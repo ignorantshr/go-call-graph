@@ -1,0 +1,22 @@
+# Binary
+go-call-graph
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test output
+*.test
+*.out
+coverage.html
+
+# Temporary
+tmp/
+web/

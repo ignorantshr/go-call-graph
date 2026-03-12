@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Go Call Graph</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Left Panel: Navigation -->
+    <div id="left-panel">
+      <div class="panel-tabs">
+        <button class="tab active" data-tab="files">Files</button>
+        <button class="tab" data-tab="bookmarks">Marks</button>
+        <button class="tab" data-tab="muted">Muted</button>
+      </div>
+      <div class="panel-search">
+        <input type="text" id="search-input" placeholder="Search functions, files...">
+      </div>
+      <div class="tab-content active" id="tab-files">
+        <div id="file-tree"></div>
+      </div>
+      <div class="tab-content" id="tab-bookmarks">
+        <div class="tab-actions">
+          <button id="bookmark-chain-btn" class="small-btn" title="Show only paths between bookmarks">Chain Mode</button>
+        </div>
+        <div id="bookmark-list"></div>
+      </div>
+      <div class="tab-content" id="tab-muted">
+        <div class="tab-actions">
+          <button id="add-mute-btn" class="small-btn">+ Add Rule</button>
+        </div>
+        <div id="muted-list"></div>
+      </div>
+    </div>
+
+    <!-- Center Panel: Call Graph -->
+    <div id="center-panel">
+      <div id="graph-toolbar">
+        <button id="fit-btn" class="toolbar-btn" title="Fit to view">Fit</button>
+        <span class="toolbar-sep"></span>
+        <label class="toolbar-label">Depth</label>
+        <input type="range" id="depth-slider" min="1" max="5" value="3" class="toolbar-slider">
+        <span id="depth-value" class="toolbar-value">3</span>
+        <span class="toolbar-sep"></span>
+        <select id="color-mode" class="toolbar-select">
+          <option value="package">Color by Package</option>
+          <option value="complexity">Color by Complexity</option>
+        </select>
+        <span class="toolbar-sep"></span>
+        <span id="zoom-level" class="toolbar-value">100%</span>
+      </div>
+      <div id="graph-container">
+        <svg id="graph-svg"></svg>
+      </div>
+    </div>
+
+    <!-- Resize Handle -->
+    <div id="resize-handle"></div>
+
+    <!-- Right Panel: Code + Info -->
+    <div id="right-panel">
+      <div class="right-tabs">
+        <button class="rtab active" data-rtab="code">Code</button>
+        <button class="rtab" data-rtab="info">Info</button>
+      </div>
+      <div class="rtab-content active" id="rtab-code">
+        <div id="code-header">
+          <button id="nav-back" class="nav-btn" title="Back" disabled>&larr;</button>
+          <button id="nav-forward" class="nav-btn" title="Forward" disabled>&rarr;</button>
+          <span id="current-file-path">Click a node to view code</span>
+          <div id="code-search-bar">
+            <input type="text" id="code-search-input" placeholder="Find in file..." />
+            <span id="code-search-count"></span>
+          </div>
+          <button id="locate-toggle" class="toolbar-btn" title="Locate mode: click code to focus graph node">Locate</button>
+          <button id="wrap-toggle" class="toolbar-btn" title="Toggle word wrap">Wrap</button>
+        </div>
+        <div id="code-view"></div>
+      </div>
+      <div class="rtab-content" id="rtab-info">
+        <div id="info-header">
+          <h3 id="info-func-name">No function selected</h3>
+        </div>
+        <div id="info-details">
+          <div id="info-signature" class="info-section"></div>
+          <div id="info-doc" class="info-section"></div>
+          <div id="info-meta" class="info-section"></div>
+          <div id="info-callers" class="info-section">
+            <h4>Callers</h4>
+            <ul id="callers-list"></ul>
+          </div>
+          <div id="info-callees" class="info-section">
+            <h4>Callees</h4>
+            <ul id="callees-list"></ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Search results dropdown -->
+  <div id="search-results" class="hidden"></div>
+
+  <!-- Context menu -->
+  <div id="context-menu" class="hidden">
+    <div class="ctx-item" data-action="mute-func">Mute this function</div>
+    <div class="ctx-item" data-action="mute-pkg">Mute entire package</div>
+    <div class="ctx-item" data-action="bookmark">Toggle bookmark</div>
+  </div>
+
+  <!-- Tooltip -->
+  <div id="tooltip" class="hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
