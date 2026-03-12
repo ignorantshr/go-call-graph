@@ -6,7 +6,10 @@
       "Bash(go mod:*)",
       "Bash(go build:*)",
       "Bash(curl -s http://localhost:8083/ | head -5 && kill %1 2>/dev/null; true)",
-      "Bash(curl -s -w \"\\\\nHTTP_STATUS:%{http_code}\" \"http://localhost:8080/api/search?q=err\" 2>&1)"
+      "Bash(curl -s -w \"\\\\nHTTP_STATUS:%{http_code}\" \"http://localhost:8080/api/search?q=err\" 2>&1)",
+      "Bash(node -c internal/server/web/app.js 2>&1 && go build -o go-call-graph ./cmd/main.go 2>&1)",
+      "Bash(jj status:*)",
+      "Bash(jj diff:*)"
     ]
   }
 }

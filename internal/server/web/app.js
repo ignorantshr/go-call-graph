@@ -16,6 +16,8 @@ const App = {
     historyIdx: -1,         // current position in history
     _navigating: false,     // flag to suppress history push during back/forward
     locateMode: false,      // when true, clicking code lines focuses the graph node
+    userFolds: {},          // { filePath: [{start, end}] } — user-defined fold ranges
+    foldStart: null,        // line number of pending fold start (temporary)
   },
 
   async init() {
@@ -24,7 +26,8 @@ const App = {
     await this.tree.load();
     this.mute.renderList();
     this.bookmarks.renderList();
-    await this.graph.loadProject();
+    // Don't load full project graph at startup — too many nodes cause lag.
+    // Graph is shown when user clicks a function or double-clicks a node.
   },
 
   // ---- Persistence ----
@@ -108,6 +111,11 @@ const App = {
         e.preventDefault(); this.navForward(); return;
       }
       if (e.key === 'Escape') {
+        if (this.state.foldStart !== null) {
+          this.state.foldStart = null;
+          this.codeView.render();
+          return;
+        }
         this.graph.clearHighlights();
         document.getElementById('search-results').classList.add('hidden');
         document.getElementById('context-menu').classList.add('hidden');
@@ -181,6 +189,27 @@ const App = {
       document.getElementById('code-view').classList.toggle('word-wrap');
     });
 
+    // Outline toggle
+    document.getElementById('outline-toggle').addEventListener('click', (e) => {
+      const btn = e.currentTarget;
+      const panel = document.getElementById('code-outline');
+      btn.classList.toggle('active');
+      panel.classList.toggle('hidden');
+      localStorage.setItem('gcg-outline', panel.classList.contains('hidden') ? '0' : '1');
+      if (!panel.classList.contains('hidden')) {
+        this.codeView.updateOutlineActive();
+      }
+    });
+
+    // Restore outline state from localStorage
+    if (localStorage.getItem('gcg-outline') === '1') {
+      document.getElementById('outline-toggle').classList.add('active');
+      document.getElementById('code-outline').classList.remove('hidden');
+    }
+
+    // Set up scroll tracking for outline
+    this.codeView.trackScrollForOutline();
+
     // Toolbar
     document.getElementById('fit-btn').addEventListener('click', () => this.graph.fitToView());
 
@@ -221,7 +250,7 @@ const App = {
         this.state.muted.push({ type: 'pattern', pattern });
         this.saveLocalState();
         this.mute.renderList();
-        this.graph.loadProject();
+        this.graph.reloadCurrent();
       }
     });
 
@@ -259,8 +288,14 @@ const App = {
   async selectFunc(funcId) {
     this.state.currentFuncId = funcId;
     this.pushHistory({ type: 'func', funcId });
-    this.graph.highlightNode(funcId);
-    this.graph.centerOnNode(funcId);
+    // If node is already in current graph, just highlight; otherwise load subgraph
+    if (this.graph.nodeMap[funcId]) {
+      await this.graph.highlightNode(funcId);
+      this.graph.centerOnNode(funcId);
+    } else {
+      const depth = parseInt(document.getElementById('depth-slider').value);
+      await this.graph.loadSubgraph(funcId, depth);
+    }
     await this.showFuncCode(funcId);
     await this.infoPanel.show(funcId);
   },
@@ -280,13 +315,9 @@ const App = {
         document.getElementById('current-file-path').textContent = data.filePath.split('/').slice(-2).join('/');
         this.codeView.render();
         this.syncTreeSelection(data.filePath);
-        // Scroll to the function
-        await new Promise(r => setTimeout(r, 30));
-        const block = document.querySelector(`.func-block[data-func-id="${CSS.escape(funcId)}"]`);
-        if (block) {
-          block.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          block.classList.add('flash');
-          setTimeout(() => block.classList.remove('flash'), 1500);
+        // Scroll to the function using virtual scroll
+        if (data.startLine) {
+          this.scrollToLine(data.startLine);
         }
       }
     } catch {}
@@ -301,14 +332,12 @@ const App = {
   },
 
   // ============================================================
-  //  FORCE-DIRECTED GRAPH ENGINE
+  //  GRAPH ENGINE (dagre hierarchical layout)
   // ============================================================
   graph: {
-    nodes: [],        // {id, label, pkg, x, y, vx, vy, w, h, fx, fy, isStdLib, isExported, complexity}
-    edges: [],        // {from, to, fromNode, toNode}
+    nodes: [],        // {id, label, pkg, x, y, w, h, isStdLib, isExported, complexity}
+    edges: [],        // {from, to, fromNode, toNode, points}
     nodeMap: {},      // id -> node
-    sim: null,        // animation frame id
-    alpha: 1,
     svg: null,
     gEdges: null,
     gNodes: null,
@@ -321,24 +350,21 @@ const App = {
     // Package color map
     pkgColors: {},
     colorIdx: 0,
+    _eventsBound: false,
 
     PALETTE: [
       '#89b4fa','#a6e3a1','#f9e2af','#cba6f7','#94e2d5',
       '#f38ba8','#fab387','#89dceb','#b4befe','#f2cdcd',
     ],
 
-    async loadProject() {
-      try {
-        const data = await App.api('/api/graph/project');
-        this.setData(data);
-      } catch (e) { console.error('Failed to load project graph:', e); }
-    },
+    // Track what's currently displayed so mute changes can refresh
+    _currentFuncId: null,
 
     async loadSubgraph(funcId, depth) {
       try {
+        this._currentFuncId = funcId;
         const muted = App.mute.getMutedIds().join(',');
         const url = `/api/callgraph?func=${encodeURIComponent(funcId)}&depth=${depth}${muted ? '&muted=' + encodeURIComponent(muted) : ''}`;
-        // Clear cache for this specific url to allow depth changes
         delete App.state.cache[url];
         const data = await App.api(url);
         this.setData(data);
@@ -346,18 +372,23 @@ const App = {
       } catch (e) { console.error('Failed to load subgraph:', e); }
     },
 
+    reloadCurrent() {
+      if (this._currentFuncId) {
+        const depth = parseInt(document.getElementById('depth-slider').value);
+        this.loadSubgraph(this._currentFuncId, depth);
+      }
+    },
+
     setData(data) {
       if (!data.nodes) data.nodes = [];
       if (!data.edges) data.edges = [];
 
-      // Build stdlib set before filtering
       data.nodes.forEach(n => {
         if (n.isStdLib) App.state.stdlibIds.add(n.id);
       });
 
       App.state.graphData = data;
 
-      // Filter muted
       const mutedSet = new Set();
       data.nodes = data.nodes.filter(n => {
         if (App.mute.isMatch(n.id)) { mutedSet.add(n.id); return false; }
@@ -367,7 +398,8 @@ const App = {
 
       this.buildGraph(data);
       this.initSVG();
-      this.startSimulation();
+      this.renderPositions();
+      this.fitToView();
     },
 
     buildGraph(data) {
@@ -375,70 +407,137 @@ const App = {
       this.colorIdx = 0;
       this.nodeMap = {};
 
-      // Build nodes with initial positions (circular by package)
-      const pkgGroups = {};
-      data.nodes.forEach(n => {
-        const pkg = n.package || 'default';
-        if (!pkgGroups[pkg]) pkgGroups[pkg] = [];
-        pkgGroups[pkg].push(n);
-      });
+      const pkgSet = new Set(data.nodes.map(n => n.package || 'default'));
+      for (const pkg of pkgSet) {
+        this.pkgColors[pkg] = this.PALETTE[this.colorIdx % this.PALETTE.length];
+        this.colorIdx++;
+      }
 
-      const pkgKeys = Object.keys(pkgGroups);
-      const cx = 0, cy = 0;
+      // Create dagre graph
+      const g = new dagre.graphlib.Graph();
+      g.setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 80, edgesep: 20 });
+      g.setDefaultEdgeLabel(() => ({}));
 
       this.nodes = [];
-      pkgKeys.forEach((pkg, pi) => {
-        if (!this.pkgColors[pkg]) {
-          this.pkgColors[pkg] = this.PALETTE[this.colorIdx % this.PALETTE.length];
-          this.colorIdx++;
-        }
-        const group = pkgGroups[pkg];
-        const groupAngle = (2 * Math.PI * pi) / Math.max(pkgKeys.length, 1);
-        const groupRadius = 200 + pkgKeys.length * 30;
-        const gcx = cx + Math.cos(groupAngle) * groupRadius;
-        const gcy = cy + Math.sin(groupAngle) * groupRadius;
-
-        group.forEach((n, ni) => {
-          const angle = (2 * Math.PI * ni) / Math.max(group.length, 1);
-          const r = 40 + group.length * 15;
-          const labelLen = Math.max(n.label.length, 4);
-          const node = {
-            id: n.id,
-            label: n.label,
-            pkg: n.package || '',
-            isStdLib: n.isStdLib,
-            isExported: n.isExported,
-            complexity: n.complexity || 1,
-            x: gcx + Math.cos(angle) * r,
-            y: gcy + Math.sin(angle) * r,
-            vx: 0, vy: 0,
-            fx: null, fy: null,
-            w: labelLen * 8 + 24,
-            h: 30,
-          };
-          this.nodes.push(node);
-          this.nodeMap[n.id] = node;
-        });
+      data.nodes.forEach(n => {
+        const labelLen = Math.max(n.label.length, 4);
+        const w = labelLen * 8 + 24;
+        const h = 30;
+        g.setNode(n.id, { width: w, height: h });
+        const node = {
+          id: n.id, label: n.label,
+          pkg: n.package || '', isStdLib: n.isStdLib,
+          isExported: n.isExported, complexity: n.complexity || 1,
+          x: 0, y: 0, w, h,
+        };
+        this.nodes.push(node);
+        this.nodeMap[n.id] = node;
       });
 
-      // Build edges
       this.edges = [];
       data.edges.forEach(e => {
         const from = this.nodeMap[e.from];
         const to = this.nodeMap[e.to];
         if (from && to) {
+          g.setEdge(e.from, e.to);
           this.edges.push({ from: e.from, to: e.to, fromNode: from, toNode: to });
         }
+      });
+
+      // Run dagre layout synchronously (fast for subgraphs)
+      dagre.layout(g);
+
+      this.nodes.forEach(node => {
+        const ln = g.node(node.id);
+        if (ln) { node.x = ln.x; node.y = ln.y; }
+      });
+
+      this.edges.forEach(edge => {
+        const le = g.edge(edge.from, edge.to);
+        if (le) edge.points = le.points;
+      });
+    },
+
+    // Bind global pan/zoom/drag events once
+    _bindGlobalEvents() {
+      if (this._eventsBound) return;
+      this._eventsBound = true;
+      const container = document.getElementById('graph-container');
+      const svg = document.getElementById('graph-svg');
+
+      container.addEventListener('mousedown', (e) => {
+        if (e.target === svg || e.target === container) {
+          this.isPanning = true;
+          this.panStart = { x: e.clientX, y: e.clientY, vx: this.vx, vy: this.vy };
+          this._panDist = 0;
+          container.classList.add('grabbing');
+        }
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (this.dragNode) {
+          const pt = this.screenToWorld(e.clientX, e.clientY);
+          this.dragNode.x = pt.x;
+          this.dragNode.y = pt.y;
+          if (this.dragNode._dragStart) {
+            const dx = e.clientX - this.dragNode._dragStart.x;
+            const dy = e.clientY - this.dragNode._dragStart.y;
+            this.dragNode._dragDist = Math.sqrt(dx * dx + dy * dy);
+          }
+          this.renderPositions();
+        } else if (this.isPanning && this.panStart) {
+          const dx = e.clientX - this.panStart.x;
+          const dy = e.clientY - this.panStart.y;
+          this._panDist = Math.sqrt(dx * dx + dy * dy);
+          this.vx = this.panStart.vx + dx;
+          this.vy = this.panStart.vy + dy;
+          this.updateViewBox();
+        }
+      });
+
+      window.addEventListener('mouseup', () => {
+        if (this.dragNode) {
+          this.dragNode = null;
+        }
+        if (this.isPanning) {
+          this.isPanning = false;
+          document.getElementById('graph-container').classList.remove('grabbing');
+          this.panStart = null;
+        }
+      });
+
+      container.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = container.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        const oldScale = this.vscale;
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        this.vscale = Math.max(0.1, Math.min(5, this.vscale * delta));
+
+        this.vx = mx - (mx - this.vx) * (this.vscale / oldScale);
+        this.vy = my - (my - this.vy) * (this.vscale / oldScale);
+
+        this.updateViewBox();
+        document.getElementById('zoom-level').textContent = Math.round(this.vscale * 100) + '%';
+
+      }, { passive: false });
+
+      svg.addEventListener('click', () => {
+        if (this._panDist > 5) return;
+        this.clearHighlights();
+        App.state.currentFuncId = null;
       });
     },
 
     initSVG() {
-      const container = document.getElementById('graph-container');
+      this._bindGlobalEvents();
       const svg = document.getElementById('graph-svg');
       this.svg = svg;
       svg.innerHTML = '';
 
-      // Defs: arrow markers
       const ns = 'http://www.w3.org/2000/svg';
       const defs = document.createElementNS(ns, 'defs');
 
@@ -461,7 +560,6 @@ const App = {
 
       svg.appendChild(defs);
 
-      // Groups for edges and nodes (edges behind nodes)
       this.gEdges = document.createElementNS(ns, 'g');
       this.gEdges.setAttribute('class', 'edges-layer');
       svg.appendChild(this.gEdges);
@@ -509,15 +607,18 @@ const App = {
         node.rectEl = rect;
         node.textEl = text;
 
-        // Events
         g.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (node._dragDist > 5) return; // was dragged, not clicked
-          App.selectFunc(node.id);
+          if (node._dragDist > 5) return;
+          // Delay single-click so double-click can cancel it
+          clearTimeout(node._clickTimer);
+          node._clickTimer = setTimeout(() => App.selectFunc(node.id), 250);
         });
 
         g.addEventListener('dblclick', (e) => {
           e.stopPropagation();
+          clearTimeout(node._clickTimer);
+          App.state.currentFuncId = node.id;
           const depth = parseInt(document.getElementById('depth-slider').value);
           this.loadSubgraph(node.id, depth);
         });
@@ -540,93 +641,16 @@ const App = {
           document.getElementById('tooltip').classList.add('hidden');
         });
 
-        // Drag
         g.addEventListener('mousedown', (e) => {
           if (e.button !== 0) return;
           e.stopPropagation();
           this.dragNode = node;
           node._dragStart = { x: e.clientX, y: e.clientY };
           node._dragDist = 0;
-          node.fx = node.x;
-          node.fy = node.y;
-          this.alpha = Math.max(this.alpha, 0.3);
-          if (!this.sim) this.startSimulation();
         });
 
         this.gNodes.appendChild(g);
       });
-
-      // Pan and zoom
-      container.addEventListener('mousedown', (e) => {
-        if (e.target === svg || e.target === container) {
-          this.isPanning = true;
-          this.panStart = { x: e.clientX, y: e.clientY, vx: this.vx, vy: this.vy };
-          this._panDist = 0;
-          container.classList.add('grabbing');
-        }
-      });
-
-      window.addEventListener('mousemove', (e) => {
-        if (this.dragNode) {
-          const pt = this.screenToWorld(e.clientX, e.clientY);
-          this.dragNode.fx = pt.x;
-          this.dragNode.fy = pt.y;
-          this.dragNode.x = pt.x;
-          this.dragNode.y = pt.y;
-          if (this.dragNode._dragStart) {
-            const dx = e.clientX - this.dragNode._dragStart.x;
-            const dy = e.clientY - this.dragNode._dragStart.y;
-            this.dragNode._dragDist = Math.sqrt(dx * dx + dy * dy);
-          }
-        } else if (this.isPanning && this.panStart) {
-          const dx = e.clientX - this.panStart.x;
-          const dy = e.clientY - this.panStart.y;
-          this._panDist = Math.sqrt(dx * dx + dy * dy);
-          this.vx = this.panStart.vx + dx;
-          this.vy = this.panStart.vy + dy;
-          this.updateViewBox();
-        }
-      });
-
-      window.addEventListener('mouseup', () => {
-        if (this.dragNode) {
-          this.dragNode.fx = null;
-          this.dragNode.fy = null;
-          this.dragNode = null;
-        }
-        if (this.isPanning) {
-          this.isPanning = false;
-          document.getElementById('graph-container').classList.remove('grabbing');
-          this.panStart = null;
-        }
-      });
-
-      container.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        const rect = container.getBoundingClientRect();
-        const mx = e.clientX - rect.left;
-        const my = e.clientY - rect.top;
-
-        const oldScale = this.vscale;
-        const delta = e.deltaY > 0 ? 0.9 : 1.1;
-        this.vscale = Math.max(0.1, Math.min(5, this.vscale * delta));
-
-        // Zoom towards mouse
-        this.vx = mx - (mx - this.vx) * (this.vscale / oldScale);
-        this.vy = my - (my - this.vy) * (this.vscale / oldScale);
-
-        this.updateViewBox();
-        document.getElementById('zoom-level').textContent = Math.round(this.vscale * 100) + '%';
-      }, { passive: false });
-
-      // Click on background to deselect — only if it wasn't a drag/pan
-      svg.addEventListener('click', () => {
-        if (this._panDist > 5) return; // was a drag, not a click
-        this.clearHighlights();
-        App.state.currentFuncId = null;
-      });
-
-      this.fitToView();
     },
 
     screenToWorld(sx, sy) {
@@ -658,11 +682,13 @@ const App = {
 
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       this.nodes.forEach(n => {
+        if (!isFinite(n.x) || !isFinite(n.y)) return;
         minX = Math.min(minX, n.x - n.w / 2);
         minY = Math.min(minY, n.y - n.h / 2);
         maxX = Math.max(maxX, n.x + n.w / 2);
         maxY = Math.max(maxY, n.y + n.h / 2);
       });
+      if (!isFinite(minX)) return; // all nodes have bad positions
 
       const pad = 60;
       const gw = maxX - minX + pad * 2;
@@ -686,86 +712,6 @@ const App = {
       this.updateViewBox();
     },
 
-    // ---- Force simulation ----
-    startSimulation() {
-      this.alpha = 1;
-      if (this.sim) cancelAnimationFrame(this.sim);
-      const tick = () => {
-        this.simulateStep();
-        this.renderPositions();
-        this.alpha *= 0.995;
-        if (this.alpha > 0.001) {
-          this.sim = requestAnimationFrame(tick);
-        } else {
-          this.sim = null;
-        }
-      };
-      this.sim = requestAnimationFrame(tick);
-    },
-
-    simulateStep() {
-      const nodes = this.nodes;
-      const edges = this.edges;
-      const alpha = this.alpha;
-
-      // Repulsion (all pairs) - Barnes-Hut simplified for small graphs
-      const repK = 8000;
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const a = nodes[i], b = nodes[j];
-          let dx = b.x - a.x;
-          let dy = b.y - a.y;
-          let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          // Include node size in minimum distance
-          const minDist = (a.w + b.w) / 2 + 20;
-          if (dist < minDist) dist = minDist;
-          const force = repK / (dist * dist);
-          const fx = (dx / dist) * force * alpha;
-          const fy = (dy / dist) * force * alpha;
-          if (!a.fx) { a.vx -= fx; a.vy -= fy; }
-          if (!b.fx) { b.vx += fx; b.vy += fy; }
-        }
-      }
-
-      // Attraction (edges)
-      const springK = 0.015;
-      const idealLen = 150;
-      edges.forEach(e => {
-        const a = e.fromNode, b = e.toNode;
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const force = springK * (dist - idealLen) * alpha;
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        if (!a.fx) { a.vx += fx; a.vy += fy; }
-        if (!b.fx) { b.vx -= fx; b.vy -= fy; }
-      });
-
-      // Center gravity
-      const centerK = 0.002;
-      let avgX = 0, avgY = 0;
-      nodes.forEach(n => { avgX += n.x; avgY += n.y; });
-      avgX /= nodes.length || 1;
-      avgY /= nodes.length || 1;
-      nodes.forEach(n => {
-        if (!n.fx) {
-          n.vx -= (n.x - avgX) * centerK * alpha;
-          n.vy -= (n.y - avgY) * centerK * alpha;
-        }
-      });
-
-      // Apply velocity with damping
-      const damping = 0.6;
-      nodes.forEach(n => {
-        if (n.fx !== null) { n.x = n.fx; n.y = n.fy; n.vx = 0; n.vy = 0; return; }
-        n.vx *= damping;
-        n.vy *= damping;
-        n.x += n.vx;
-        n.y += n.vy;
-      });
-    },
-
     renderPositions() {
       // Update node positions
       this.nodes.forEach(node => {
@@ -776,29 +722,29 @@ const App = {
         node.textEl.setAttribute('y', node.y);
       });
 
-      // Update edge paths (quadratic bezier curves)
+      // Update edge paths using dagre edge points
       this.edges.forEach(edge => {
         if (!edge.el) return;
-        const a = edge.fromNode, b = edge.toNode;
-        // Offset the start/end to the edge of the node rectangles
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-
-        // Start point: edge of source node
-        const sx = a.x + (dx / dist) * (a.w / 2);
-        const sy = a.y + (dy / dist) * (a.h / 2);
-        // End point: edge of target node
-        const ex = b.x - (dx / dist) * (b.w / 2 + 8); // 8px for arrow
-        const ey = b.y - (dy / dist) * (b.h / 2 + 8);
-
-        // Control point for curve (perpendicular offset)
-        const perpX = -(dy / dist) * 20;
-        const perpY = (dx / dist) * 20;
-        const cx = (sx + ex) / 2 + perpX;
-        const cy = (sy + ey) / 2 + perpY;
-
-        edge.el.setAttribute('d', `M ${sx} ${sy} Q ${cx} ${cy} ${ex} ${ey}`);
+        if (edge.points && edge.points.length >= 2) {
+          const pts = edge.points;
+          // Shorten the last segment to stop at node border (for arrow marker)
+          const last = pts[pts.length - 1];
+          const prev = pts[pts.length - 2];
+          const b = edge.toNode;
+          const dx = last.x - prev.x, dy = last.y - prev.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const endX = last.x - (dx / dist) * (b.h / 2 + 4);
+          const endY = last.y - (dy / dist) * (b.h / 2 + 4);
+          let d = `M ${pts[0].x} ${pts[0].y}`;
+          for (let i = 1; i < pts.length - 1; i++) {
+            d += ` L ${pts[i].x} ${pts[i].y}`;
+          }
+          d += ` L ${endX} ${endY}`;
+          edge.el.setAttribute('d', d);
+        } else {
+          const a = edge.fromNode, b = edge.toNode;
+          edge.el.setAttribute('d', `M ${a.x} ${a.y} L ${b.x} ${b.y}`);
+        }
       });
     },
 
@@ -990,15 +936,19 @@ const App = {
   },
 
   scrollToLine(lineNum) {
-    const lines = document.querySelectorAll('#code-view .stmt-line');
-    for (const el of lines) {
-      const numEl = el.querySelector('.line-number');
-      if (numEl && parseInt(numEl.textContent) === lineNum) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        el.classList.add('flash');
-        setTimeout(() => el.classList.remove('flash'), 1500);
-        break;
-      }
+    const row = this.codeView._getVisibleRowForLine(lineNum);
+    if (row >= 0) {
+      const container = document.getElementById('code-view');
+      const targetTop = row * this.codeView.LINE_HEIGHT;
+      container.scrollTop = Math.max(0, targetTop - container.clientHeight / 3);
+      // Wait for render then flash
+      requestAnimationFrame(() => {
+        const el = container.querySelector(`.stmt-line[data-line="${lineNum}"]`);
+        if (el) {
+          el.classList.add('flash');
+          setTimeout(() => el.classList.remove('flash'), 1500);
+        }
+      });
     }
   },
 
@@ -1050,184 +1000,609 @@ const App = {
   },
 
   // ============================================================
+  //  USER FOLDS
+  // ============================================================
+  folds: {
+    add(filePath, start, end) {
+      if (start > end) [start, end] = [end, start];
+      if (start === end) return;
+      if (!App.state.userFolds[filePath]) App.state.userFolds[filePath] = [];
+      const folds = App.state.userFolds[filePath];
+      // Remove any existing folds that overlap with the new range
+      App.state.userFolds[filePath] = folds.filter(f => f.end < start || f.start > end);
+      App.state.userFolds[filePath].push({ start, end });
+      App.state.userFolds[filePath].sort((a, b) => a.start - b.start);
+    },
+    remove(filePath, start, end) {
+      if (!App.state.userFolds[filePath]) return;
+      App.state.userFolds[filePath] = App.state.userFolds[filePath].filter(
+        f => !(f.start === start && f.end === end)
+      );
+    },
+    get(filePath) {
+      return (App.state.userFolds[filePath] || []).slice().sort((a, b) => a.start - b.start);
+    },
+    // Find the fold that contains this line (1-indexed), or null
+    findFold(filePath, lineNum) {
+      const folds = App.state.userFolds[filePath] || [];
+      return folds.find(f => lineNum >= f.start && lineNum <= f.end) || null;
+    },
+  },
+
+  // ============================================================
   //  CODE VIEW (right panel)
   // ============================================================
   codeView: {
+    LINE_HEIGHT: 19,
+    _lines: [],           // prepared line data [{lineNum, html, funcId, type, blockClass, foldData, expanded}]
+    _visibleStart: -1,
+    _visibleEnd: -1,
+    _scrollBound: false,
+    _syntaxCache: new Map(), // filePath -> Map(lineIdx -> html)
+    _searchQuery: '',
+    _searchMatchLines: [], // [{dataIdx, positions}]
+    _searchIdx: -1,
+
     render() {
       const container = document.getElementById('code-view');
       const file = App.state.currentFile;
       if (!file) {
         container.innerHTML = '<div style="padding:16px;color:var(--text-dim);font-size:12px">Click a node to view code</div>';
+        this._lines = [];
         return;
       }
-      container.innerHTML = '';
-      const sourceLines = file.source.split('\n');
 
-      if (file.functions && file.functions.length > 0) {
-        const funcs = [...file.functions].sort((a, b) => a.startLine - b.startLine);
-        let lastEnd = 0;
-        funcs.forEach(fn => {
-          if (fn.startLine - 1 > lastEnd) this.renderPlainLines(container, sourceLines, lastEnd, fn.startLine - 1);
-          this.renderFuncBlock(container, fn, sourceLines);
-          lastEnd = fn.endLine;
+      // Prepare line data
+      this._prepareLines(file);
+
+      // Count visible lines
+      const visibleCount = this._lines.filter(l => !l.hidden).length;
+      const totalHeight = visibleCount * this.LINE_HEIGHT;
+
+      container.innerHTML = '';
+      const spacer = document.createElement('div');
+      spacer.className = 'vscroll-spacer';
+      spacer.style.height = totalHeight + 'px';
+      const content = document.createElement('div');
+      content.className = 'vscroll-content';
+      spacer.appendChild(content);
+      container.appendChild(spacer);
+
+      // Bind scroll once
+      if (!this._scrollBound) {
+        this._scrollBound = true;
+        let ticking = false;
+        document.getElementById('code-view').addEventListener('scroll', () => {
+          if (ticking) return;
+          ticking = true;
+          requestAnimationFrame(() => {
+            ticking = false;
+            this._renderVisible();
+            this.updateOutlineActive();
+          });
         });
-        if (lastEnd < sourceLines.length) this.renderPlainLines(container, sourceLines, lastEnd, sourceLines.length);
-      } else {
-        this.renderPlainLines(container, sourceLines, 0, sourceLines.length);
+      }
+
+      this._visibleStart = -1;
+      this._visibleEnd = -1;
+      this._renderVisible();
+      this.renderOutline();
+
+      // Re-apply search if active
+      if (this._searchQuery) {
+        this._computeSearchMatches(this._searchQuery);
       }
     },
 
-    // Create a line-number span with bookmark dot and click handler
+    _prepareLines(file) {
+      this._lines = [];
+      const sourceLines = file.source.split('\n');
+      const filePath = file.path || '';
+      const folds = App.folds.get(filePath);
+
+      // Build call-target map: lineNum -> {cls, escaped, linkHtml}
+      const callTargets = {};
+      if (file.functions) {
+        for (const fn of file.functions) {
+          if (!fn.statements) continue;
+          for (const stmt of fn.statements) {
+            if (stmt.callTarget && stmt.startLine) {
+              const t = stmt.callTarget;
+              const cls = t.isStdLib ? 'call-link stdlib' : (t.isExternal ? 'call-link external' : 'call-link');
+              const escaped = this.esc(t.function);
+              callTargets[stmt.startLine] = {
+                cls, escaped,
+                linkHtml: `<span class="${cls}" data-func-id="${this.esc(t.funcId)}" title="${this.esc(t.funcId)}">${escaped}</span>`,
+              };
+            }
+          }
+        }
+      }
+
+      // Build func ranges for highlight classes
+      const funcRanges = [];
+      if (file.functions) {
+        const funcs = [...file.functions].sort((a, b) => a.startLine - b.startLine);
+        for (const fn of funcs) {
+          funcRanges.push({ id: fn.id, start: fn.startLine, end: fn.endLine, isMuted: App.mute.isMatch(fn.id) });
+        }
+      }
+
+      // Get or create syntax cache for this file
+      let syntaxMap = this._syntaxCache.get(filePath);
+      if (!syntaxMap) {
+        syntaxMap = new Map();
+        this._syntaxCache.set(filePath, syntaxMap);
+        // Limit cache to 5 files
+        if (this._syntaxCache.size > 5) {
+          const first = this._syntaxCache.keys().next().value;
+          this._syntaxCache.delete(first);
+        }
+      }
+
+      const getHighlighted = (lineIdx) => {
+        if (syntaxMap.has(lineIdx)) return syntaxMap.get(lineIdx);
+        const html = this.highlightSyntax(this.esc(sourceLines[lineIdx]));
+        syntaxMap.set(lineIdx, html);
+        return html;
+      };
+
+      // Walk through all source lines, building _lines entries
+      let lineNum = 1;
+      const totalLines = sourceLines.length;
+
+      // Find which func-block each line belongs to
+      const lineFuncId = (ln) => {
+        for (const fr of funcRanges) {
+          if (ln >= fr.start && ln <= fr.end) return fr;
+        }
+        return null;
+      };
+
+      while (lineNum <= totalLines) {
+        const fr = lineFuncId(lineNum);
+
+        // Muted function block — emit summary only
+        if (fr && fr.isMuted && lineNum === fr.start) {
+          this._lines.push({
+            lineNum, type: 'muted-block', funcId: fr.id, hidden: false,
+            html: '', blockClass: 'func-block muted-block',
+            mutedLabel: `[muted] ${fr.id}`,
+          });
+          lineNum = fr.end + 1;
+          continue;
+        }
+
+        // Check user fold
+        const fold = folds.find(f => f.start === lineNum);
+        if (fold && fold.end >= lineNum) {
+          // Fold summary line
+          const count = fold.end - fold.start + 1;
+          this._lines.push({
+            lineNum, type: 'user-fold-summary', hidden: false,
+            funcId: fr ? fr.id : null,
+            blockClass: fr ? 'func-block' : '',
+            foldData: { start: fold.start, end: fold.end, count },
+            expanded: false,
+          });
+          // Folded content lines (hidden by default)
+          for (let i = fold.start; i <= fold.end; i++) {
+            if (i < 1 || i > totalLines) continue;
+            let codeHtml = getHighlighted(i - 1);
+            const ct = callTargets[i];
+            if (ct) {
+              const idx = codeHtml.indexOf(ct.escaped);
+              if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+            }
+            this._lines.push({
+              lineNum: i, type: 'user-fold-content', hidden: true,
+              funcId: fr ? fr.id : null, blockClass: fr ? 'func-block' : '',
+              html: codeHtml, foldOwner: fold.start,
+            });
+          }
+          lineNum = fold.end + 1;
+          continue;
+        }
+        // Skip lines inside a fold
+        if (folds.some(f => lineNum > f.start && lineNum <= f.end)) { lineNum++; continue; }
+
+        // Check comment fold (>2 consecutive comment lines)
+        if (this.isCommentLine(sourceLines[lineNum - 1])) {
+          let j = lineNum;
+          const limit = fr ? fr.end : totalLines;
+          while (j <= limit && j <= totalLines && this.isCommentLine(sourceLines[j - 1])) j++;
+          const commentCount = j - lineNum;
+          if (commentCount > 2) {
+            // First 2 lines visible
+            for (let i = lineNum; i < lineNum + 2; i++) {
+              this._lines.push({
+                lineNum: i, type: 'line', hidden: false,
+                funcId: fr ? fr.id : null, blockClass: fr ? 'func-block' : '',
+                html: getHighlighted(i - 1),
+              });
+            }
+            // Comment fold summary
+            this._lines.push({
+              lineNum: lineNum + 2, type: 'comment-fold-summary', hidden: false,
+              funcId: fr ? fr.id : null, blockClass: fr ? 'func-block' : '',
+              foldData: { start: lineNum + 2, end: j - 1, count: commentCount - 2 },
+              expanded: false,
+            });
+            // Hidden comment content
+            for (let i = lineNum + 2; i < j; i++) {
+              this._lines.push({
+                lineNum: i, type: 'comment-fold-content', hidden: true,
+                funcId: fr ? fr.id : null, blockClass: fr ? 'func-block' : '',
+                html: getHighlighted(i - 1), foldOwner: lineNum + 2,
+              });
+            }
+            lineNum = j;
+            continue;
+          }
+        }
+
+        // Regular line
+        let codeHtml = getHighlighted(lineNum - 1);
+        const ct = callTargets[lineNum];
+        if (ct) {
+          const idx = codeHtml.indexOf(ct.escaped);
+          if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+        }
+        this._lines.push({
+          lineNum, type: 'line', hidden: false,
+          funcId: fr ? fr.id : null, blockClass: fr ? 'func-block' : '',
+          html: codeHtml,
+        });
+        lineNum++;
+      }
+    },
+
+    _renderVisible() {
+      const container = document.getElementById('code-view');
+      if (!container) return;
+      const content = container.querySelector('.vscroll-content');
+      if (!content) return;
+
+      const scrollTop = container.scrollTop;
+      const clientHeight = container.clientHeight;
+      const LH = this.LINE_HEIGHT;
+      const buffer = 30;
+
+      // Build visible-index array (lines that aren't hidden)
+      // Use cached version for performance
+      if (!this._visibleIndices || this._visibleIndices._ver !== this._lines) {
+        const arr = [];
+        for (let i = 0; i < this._lines.length; i++) {
+          if (!this._lines[i].hidden) arr.push(i);
+        }
+        arr._ver = this._lines;
+        this._visibleIndices = arr;
+      }
+      const visIdx = this._visibleIndices;
+
+      const startRow = Math.max(0, Math.floor(scrollTop / LH) - buffer);
+      const endRow = Math.min(visIdx.length - 1, Math.ceil((scrollTop + clientHeight) / LH) + buffer);
+
+      if (startRow === this._visibleStart && endRow === this._visibleEnd) return;
+      this._visibleStart = startRow;
+      this._visibleEnd = endRow;
+
+      content.innerHTML = '';
+      content.style.transform = `translateY(${startRow * LH}px)`;
+
+      const filePath = App.state.currentFile ? App.state.currentFile.path : '';
+      const searchQ = this._searchQuery ? this._searchQuery.toLowerCase() : '';
+
+      // Track func blocks for borders
+      let currentFuncId = null;
+      let funcBlockDiv = null;
+      let funcBodyDiv = null;
+
+      for (let r = startRow; r <= endRow && r < visIdx.length; r++) {
+        const dataIdx = visIdx[r];
+        const entry = this._lines[dataIdx];
+
+        // Manage func-block grouping
+        if (entry.funcId !== currentFuncId) {
+          if (funcBlockDiv) {
+            if (funcBodyDiv) funcBlockDiv.appendChild(funcBodyDiv);
+            content.appendChild(funcBlockDiv);
+          }
+          currentFuncId = entry.funcId;
+          if (currentFuncId) {
+            funcBlockDiv = document.createElement('div');
+            funcBlockDiv.className = 'func-block';
+            funcBlockDiv.dataset.funcId = currentFuncId;
+            funcBodyDiv = document.createElement('div');
+            funcBodyDiv.className = 'func-body';
+          } else {
+            funcBlockDiv = null;
+            funcBodyDiv = null;
+          }
+        }
+
+        const target = funcBodyDiv || content;
+
+        if (entry.type === 'muted-block') {
+          const block = document.createElement('div');
+          block.className = 'func-block muted-block';
+          block.dataset.funcId = entry.funcId;
+          const label = document.createElement('div');
+          label.className = 'muted-label';
+          label.textContent = entry.mutedLabel;
+          block.appendChild(label);
+          content.appendChild(block);
+          currentFuncId = null; funcBlockDiv = null; funcBodyDiv = null;
+          continue;
+        }
+
+        if (entry.type === 'user-fold-summary') {
+          const fd = entry.foldData;
+          const group = document.createElement('div');
+          group.className = 'fold-group user-fold';
+          const summary = document.createElement('div');
+          summary.className = 'fold-summary';
+          const text = document.createElement('span');
+          text.textContent = entry.expanded
+            ? `▼ [${fd.start}-${fd.end} (${fd.count} lines)]`
+            : `▶ [${fd.start}-${fd.end} folded (${fd.count} lines)]`;
+          summary.appendChild(text);
+          const removeBtn = document.createElement('span');
+          removeBtn.className = 'fold-remove';
+          removeBtn.textContent = '×';
+          removeBtn.title = 'Remove fold';
+          removeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            App.folds.remove(filePath, fd.start, fd.end);
+            App.codeView.render();
+          });
+          summary.appendChild(removeBtn);
+          group.appendChild(summary);
+          group.addEventListener('click', (e) => {
+            if (e.target.closest('.fold-remove')) return;
+            entry.expanded = !entry.expanded;
+            // Toggle hidden state of content lines
+            for (const l of this._lines) {
+              if (l.foldOwner === fd.start && l.type === 'user-fold-content') {
+                l.hidden = !entry.expanded;
+              }
+            }
+            this._visibleIndices = null; // invalidate
+            this._recalcHeight();
+            this._visibleStart = -1; this._visibleEnd = -1;
+            this._renderVisible();
+          });
+          target.appendChild(group);
+          continue;
+        }
+
+        if (entry.type === 'comment-fold-summary') {
+          const fd = entry.foldData;
+          const group = document.createElement('div');
+          group.className = 'fold-group';
+          const summary = document.createElement('div');
+          summary.className = 'fold-summary';
+          summary.textContent = entry.expanded
+            ? `▼ [${fd.count} comment lines]`
+            : `▶ [${fd.count} more comment lines]`;
+          group.appendChild(summary);
+          group.addEventListener('click', () => {
+            entry.expanded = !entry.expanded;
+            for (const l of this._lines) {
+              if (l.foldOwner === fd.start && l.type === 'comment-fold-content') {
+                l.hidden = !entry.expanded;
+              }
+            }
+            this._visibleIndices = null;
+            this._recalcHeight();
+            this._visibleStart = -1; this._visibleEnd = -1;
+            this._renderVisible();
+          });
+          target.appendChild(group);
+          continue;
+        }
+
+        // Regular line, user-fold-content, or comment-fold-content
+        const line = document.createElement('div');
+        line.className = 'stmt-line';
+        line.dataset.line = entry.lineNum;
+        line.appendChild(this.makeLineNum(entry.lineNum));
+        const codeSpan = document.createElement('span');
+        codeSpan.className = 'line-code';
+        let html = entry.html;
+        // Apply search highlights inline
+        if (searchQ && html) {
+          html = this._applySearchHighlight(html, searchQ);
+        }
+        codeSpan.innerHTML = html;
+        line.appendChild(codeSpan);
+        target.appendChild(line);
+      }
+
+      // Flush last func block
+      if (funcBlockDiv) {
+        if (funcBodyDiv) funcBlockDiv.appendChild(funcBodyDiv);
+        content.appendChild(funcBlockDiv);
+      }
+
+      // Apply highlight classes to func blocks
+      if (App.state.highlights) {
+        const hl = App.state.highlights;
+        content.querySelectorAll('.func-block').forEach(block => {
+          const fid = block.dataset.funcId;
+          if (fid === hl.current) block.classList.add('highlight-current');
+          else if (hl.callers.includes(fid)) block.classList.add('highlight-caller');
+          else if (hl.callees.includes(fid)) block.classList.add('highlight-callee');
+        });
+      }
+    },
+
+    _recalcHeight() {
+      const container = document.getElementById('code-view');
+      if (!container) return;
+      const spacer = container.querySelector('.vscroll-spacer');
+      if (!spacer) return;
+      const visibleCount = this._lines.filter(l => !l.hidden).length;
+      spacer.style.height = (visibleCount * this.LINE_HEIGHT) + 'px';
+    },
+
+    _applySearchHighlight(html, query) {
+      // Apply <mark> to visible text matches, preserving HTML tags
+      // Strategy: split by HTML tags, highlight text segments, rejoin
+      const parts = html.split(/(<[^>]+>)/);
+      const qLower = query.toLowerCase();
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i].startsWith('<')) continue; // HTML tag
+        const text = parts[i];
+        const lower = text.toLowerCase();
+        if (!lower.includes(qLower)) continue;
+        let result = '';
+        let pos = 0;
+        let idx;
+        while ((idx = lower.indexOf(qLower, pos)) !== -1) {
+          result += text.substring(pos, idx);
+          result += '<mark>' + text.substring(idx, idx + query.length) + '</mark>';
+          pos = idx + query.length;
+        }
+        result += text.substring(pos);
+        parts[i] = result;
+      }
+      return parts.join('');
+    },
+
+    // Get the visible-row index for a given lineNum
+    _getVisibleRowForLine(lineNum) {
+      if (!this._visibleIndices) return -1;
+      let row = 0;
+      for (const dataIdx of this._visibleIndices) {
+        if (this._lines[dataIdx].lineNum === lineNum && this._lines[dataIdx].type === 'line') return row;
+        row++;
+      }
+      // Also check fold summaries
+      row = 0;
+      for (const dataIdx of this._visibleIndices) {
+        if (this._lines[dataIdx].lineNum === lineNum) return row;
+        row++;
+      }
+      return -1;
+    },
+
+    // Get the visible-row index for a func-block start
+    _getVisibleRowForFunc(funcId) {
+      if (!this._visibleIndices) return -1;
+      let row = 0;
+      for (const dataIdx of this._visibleIndices) {
+        if (this._lines[dataIdx].funcId === funcId) return row;
+        row++;
+      }
+      return -1;
+    },
+
+    renderOutline() {
+      const panel = document.getElementById('code-outline');
+      if (!panel) return;
+      panel.innerHTML = '';
+      const file = App.state.currentFile;
+      if (!file || !file.functions || file.functions.length === 0) return;
+      const funcs = [...file.functions].sort((a, b) => a.startLine - b.startLine);
+      funcs.forEach(fn => {
+        const item = document.createElement('div');
+        item.className = 'outline-item';
+        item.dataset.funcId = fn.id;
+        item.dataset.line = fn.startLine;
+        let label = '';
+        if (fn.recvType) label += '<span class="outline-recv">' + this.esc(fn.recvType) + ' </span>';
+        if (fn.isExported) label += '<span class="outline-exported">' + this.esc(fn.name) + '</span>';
+        else label += this.esc(fn.name);
+        item.innerHTML = label;
+        item.title = fn.signature || fn.name;
+        item.addEventListener('click', () => {
+          App.scrollToLine(fn.startLine);
+        });
+        panel.appendChild(item);
+      });
+    },
+
+    _scrollTrackTimer: null,
+    trackScrollForOutline() {
+      // Scroll tracking is now integrated into the main scroll handler in render()
+      this._scrollTrackTimer = true;
+    },
+
+    updateOutlineActive() {
+      const codeView = document.getElementById('code-view');
+      const panel = document.getElementById('code-outline');
+      if (!codeView || !panel || panel.classList.contains('hidden')) return;
+      // Use scroll position to determine which func is visible
+      const scrollTop = codeView.scrollTop;
+      const midRow = Math.floor((scrollTop + codeView.clientHeight / 3) / this.LINE_HEIGHT);
+      if (!this._visibleIndices || midRow >= this._visibleIndices.length) return;
+      const dataIdx = this._visibleIndices[Math.min(midRow, this._visibleIndices.length - 1)];
+      const entry = this._lines[dataIdx];
+      const items = panel.querySelectorAll('.outline-item');
+      items.forEach(it => it.classList.remove('active'));
+      if (entry && entry.funcId) {
+        const activeItem = panel.querySelector(`.outline-item[data-func-id="${CSS.escape(entry.funcId)}"]`);
+        if (activeItem) {
+          activeItem.classList.add('active');
+          const panelRect = panel.getBoundingClientRect();
+          const itemRect = activeItem.getBoundingClientRect();
+          if (itemRect.top < panelRect.top || itemRect.bottom > panelRect.bottom) {
+            activeItem.scrollIntoView({ block: 'nearest' });
+          }
+        }
+      }
+    },
+
+    // Create a line-number span with bookmark dot and click/dblclick handlers
     makeLineNum(lineNum) {
       const filePath = App.state.currentFile ? App.state.currentFile.path : '';
       const bm = App.bookmarks.getLineBookmark(filePath, lineNum);
+      const isFoldStart = App.state.foldStart === lineNum;
       const span = document.createElement('span');
-      span.className = 'line-number' + (bm ? ' has-bookmark' : '');
+      let cls = 'line-number';
+      if (bm) cls += ' has-bookmark';
+      if (isFoldStart) cls += ' fold-start';
+      span.className = cls;
       if (bm) {
         span.innerHTML = '<span class="bm-dot" title="' + App.codeView.esc(bm.label) + '">●</span>' + lineNum;
+      } else if (isFoldStart) {
+        span.innerHTML = '<span class="fold-marker">▼</span>' + lineNum;
       } else {
         span.textContent = lineNum;
       }
+      // Single click: fold operations
       span.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (App.state.foldStart === null) {
+          App.state.foldStart = lineNum;
+          span.classList.add('fold-start');
+          span.innerHTML = '<span class="fold-marker">▼</span>' + lineNum;
+        } else if (App.state.foldStart === lineNum) {
+          App.state.foldStart = null;
+          span.classList.remove('fold-start');
+          span.textContent = lineNum;
+        } else {
+          const start = Math.min(App.state.foldStart, lineNum);
+          const end = Math.max(App.state.foldStart, lineNum);
+          App.state.foldStart = null;
+          App.folds.add(filePath, start, end);
+          App.codeView.render();
+        }
+      });
+      // Double click: bookmark (original behavior)
+      span.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        App.state.foldStart = null;
         App.bookmarks.toggleLine(filePath, lineNum);
       });
       return span;
     },
 
-    // Check if a source line is a comment-only line
     isCommentLine(line) {
       const t = line.trimStart();
       return t.startsWith('//') || t.startsWith('/*') || t.startsWith('*') && !t.startsWith('*/');
-    },
-
-    renderPlainLines(container, lines, start, end) {
-      let i = start;
-      while (i < end) {
-        // Detect consecutive comment lines (>2 → fold)
-        if (this.isCommentLine(lines[i])) {
-          let j = i;
-          while (j < end && this.isCommentLine(lines[j])) j++;
-          const count = j - i;
-          if (count > 2) {
-            this.renderCommentFold(container, lines, i, j);
-            i = j;
-            continue;
-          }
-        }
-        const line = document.createElement('div');
-        line.className = 'stmt-line';
-        line.appendChild(this.makeLineNum(i + 1));
-        const codeSpan = document.createElement('span');
-        codeSpan.className = 'line-code';
-        codeSpan.innerHTML = this.highlightSyntax(this.esc(lines[i]));
-        line.appendChild(codeSpan);
-        container.appendChild(line);
-        i++;
-      }
-    },
-
-    // Render a foldable comment block — shows first 2 lines, rest collapsed
-    renderCommentFold(container, lines, start, end) {
-      const count = end - start;
-      // Show first 2 lines
-      for (let i = start; i < start + 2; i++) {
-        const line = document.createElement('div');
-        line.className = 'stmt-line';
-        line.appendChild(this.makeLineNum(i + 1));
-        const codeSpan = document.createElement('span');
-        codeSpan.className = 'line-code';
-        codeSpan.innerHTML = this.highlightSyntax(this.esc(lines[i]));
-        line.appendChild(codeSpan);
-        container.appendChild(line);
-      }
-      // Fold toggle for remaining lines
-      const group = document.createElement('div');
-      group.className = 'fold-group';
-      const summary = document.createElement('div');
-      summary.className = 'fold-summary';
-      summary.textContent = `▶ [${count - 2} more comment lines]`;
-      group.appendChild(summary);
-      const content = document.createElement('div');
-      content.className = 'fold-content';
-      for (let i = start + 2; i < end; i++) {
-        const line = document.createElement('div');
-        line.className = 'stmt-line';
-        line.appendChild(this.makeLineNum(i + 1));
-        const codeSpan = document.createElement('span');
-        codeSpan.className = 'line-code';
-        codeSpan.innerHTML = this.highlightSyntax(this.esc(lines[i]));
-        line.appendChild(codeSpan);
-        content.appendChild(line);
-      }
-      group.appendChild(content);
-      group.addEventListener('click', () => {
-        group.classList.toggle('expanded');
-        summary.textContent = group.classList.contains('expanded')
-          ? `▼ [${count - 2} comment lines]`
-          : `▶ [${count - 2} more comment lines]`;
-      });
-      container.appendChild(group);
-    },
-
-    renderFuncBlock(container, fn, sourceLines) {
-      const isMuted = App.mute.isMatch(fn.id);
-      const block = document.createElement('div');
-      block.className = 'func-block' + (isMuted ? ' muted-block' : '');
-      block.dataset.funcId = fn.id;
-
-      if (isMuted) {
-        const label = document.createElement('div');
-        label.className = 'muted-label';
-        label.textContent = `[muted] ${fn.id}`;
-        block.appendChild(label);
-        container.appendChild(block);
-        return;
-      }
-
-      const body = document.createElement('div');
-      body.className = 'func-body';
-
-      let line = fn.startLine;
-      while (line <= fn.endLine) {
-        if (line < 1 || line > sourceLines.length) { line++; continue; }
-        // Detect consecutive comment lines inside function body
-        if (this.isCommentLine(sourceLines[line - 1])) {
-          let j = line;
-          while (j <= fn.endLine && j <= sourceLines.length && this.isCommentLine(sourceLines[j - 1])) j++;
-          if (j - line > 2) {
-            // Use 1-indexed lines but renderCommentFold uses 0-indexed array
-            this.renderCommentFold(body, sourceLines, line - 1, j - 1);
-            line = j;
-            continue;
-          }
-        }
-        const el = document.createElement('div');
-        el.className = 'stmt-line';
-        let codeHtml = this.highlightSyntax(this.esc(sourceLines[line - 1]));
-        // Link call targets on their starting lines
-        if (fn.statements) {
-          const stmt = fn.statements.find(s => s.startLine === line && s.callTarget);
-          if (stmt) {
-            const t = stmt.callTarget;
-            const cls = t.isStdLib ? 'call-link stdlib' : (t.isExternal ? 'call-link external' : 'call-link');
-            const escaped = this.esc(t.function);
-            const linkHtml = `<span class="${cls}" data-func-id="${this.esc(t.funcId)}" title="${this.esc(t.funcId)}">${escaped}</span>`;
-            const idx = codeHtml.indexOf(escaped);
-            if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + linkHtml + codeHtml.substring(idx + escaped.length);
-          }
-        }
-        el.appendChild(this.makeLineNum(line));
-        const codeSpan = document.createElement('span');
-        codeSpan.className = 'line-code';
-        codeSpan.innerHTML = codeHtml;
-        el.appendChild(codeSpan);
-        body.appendChild(el);
-        line++;
-      }
-
-      block.appendChild(body);
-      container.appendChild(block);
     },
 
     renderStatement(container, stmt, sourceLines) {
@@ -1277,98 +1652,76 @@ const App = {
 
     // ---- File-internal search ----
     _searchMatches: [],
-    _searchIdx: -1,
+
+    _computeSearchMatches(query) {
+      this._searchMatches = [];
+      this._searchIdx = -1;
+      const q = query.toLowerCase();
+      const countEl = document.getElementById('code-search-count');
+      for (let i = 0; i < this._lines.length; i++) {
+        const entry = this._lines[i];
+        if (entry.type !== 'line' && entry.type !== 'user-fold-content' && entry.type !== 'comment-fold-content') continue;
+        // Get plain text from html by stripping tags
+        const plainText = (entry.html || '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+        if (plainText.toLowerCase().includes(q)) {
+          this._searchMatches.push({ dataIdx: i, lineNum: entry.lineNum });
+        }
+      }
+      if (countEl) {
+        countEl.textContent = this._searchMatches.length > 0 ? `0/${this._searchMatches.length}` : 'No results';
+      }
+      // Force re-render to apply highlights
+      this._visibleStart = -1; this._visibleEnd = -1;
+      this._renderVisible();
+    },
 
     fileSearch(query) {
-      this.clearSearch();
+      this._searchQuery = query || '';
       const countEl = document.getElementById('code-search-count');
-      if (!query || query.length < 1) { countEl.textContent = ''; return; }
-      const container = document.getElementById('code-view');
-      const lines = container.querySelectorAll('.line-code');
-      const q = query.toLowerCase();
-      const matches = [];
-      lines.forEach(lineEl => {
-        const text = lineEl.textContent;
-        const lower = text.toLowerCase();
-        let idx = lower.indexOf(q);
-        if (idx === -1) return;
-        // Walk text nodes and wrap matches with <mark>
-        const walker = document.createTreeWalker(lineEl, NodeFilter.SHOW_TEXT);
-        const textNodes = [];
-        let node;
-        while ((node = walker.nextNode())) textNodes.push(node);
-        let charOffset = 0;
-        for (const tn of textNodes) {
-          const tnLen = tn.textContent.length;
-          const tnStart = charOffset;
-          const tnEnd = charOffset + tnLen;
-          // Find all match ranges that overlap this text node
-          let si = 0;
-          const src = text.toLowerCase();
-          while ((si = src.indexOf(q, si)) !== -1) {
-            const matchStart = si;
-            const matchEnd = si + query.length;
-            if (matchEnd > tnStart && matchStart < tnEnd) {
-              // This text node contains part of a match — do inline replace
-              const relStart = Math.max(0, matchStart - tnStart);
-              const relEnd = Math.min(tnLen, matchEnd - tnStart);
-              if (relStart < relEnd && matchStart >= tnStart && matchEnd <= tnEnd) {
-                const before = tn.textContent.substring(0, relStart);
-                const matched = tn.textContent.substring(relStart, relEnd);
-                const after = tn.textContent.substring(relEnd);
-                const mark = document.createElement('mark');
-                mark.textContent = matched;
-                matches.push(mark);
-                const parent = tn.parentNode;
-                if (before) parent.insertBefore(document.createTextNode(before), tn);
-                parent.insertBefore(mark, tn);
-                if (after) {
-                  const afterNode = document.createTextNode(after);
-                  parent.insertBefore(afterNode, tn);
-                }
-                parent.removeChild(tn);
-                break; // re-scan needed, but for simplicity only first match per text node
-              }
-            }
-            si++;
-          }
-          charOffset += tnLen;
-        }
-      });
-      this._searchMatches = matches;
-      this._searchIdx = -1;
-      countEl.textContent = matches.length > 0 ? `0/${matches.length}` : 'No results';
-      if (matches.length > 0) this.fileSearchNext();
+      if (!query || query.length < 1) {
+        this._searchMatches = [];
+        this._searchIdx = -1;
+        this._searchQuery = '';
+        if (countEl) countEl.textContent = '';
+        this._visibleStart = -1; this._visibleEnd = -1;
+        this._renderVisible();
+        return;
+      }
+      this._computeSearchMatches(query);
+      if (this._searchMatches.length > 0) this.fileSearchNext();
     },
 
     fileSearchNext() {
       if (this._searchMatches.length === 0) return;
-      if (this._searchIdx >= 0) this._searchMatches[this._searchIdx].classList.remove('search-current');
       this._searchIdx = (this._searchIdx + 1) % this._searchMatches.length;
-      const m = this._searchMatches[this._searchIdx];
-      m.classList.add('search-current');
-      m.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const match = this._searchMatches[this._searchIdx];
+      // Scroll to the matched line
+      const row = this._getVisibleRowForLine(match.lineNum);
+      if (row >= 0) {
+        const container = document.getElementById('code-view');
+        container.scrollTop = Math.max(0, row * this.LINE_HEIGHT - container.clientHeight / 2);
+      }
       document.getElementById('code-search-count').textContent = `${this._searchIdx + 1}/${this._searchMatches.length}`;
     },
 
     fileSearchPrev() {
       if (this._searchMatches.length === 0) return;
-      if (this._searchIdx >= 0) this._searchMatches[this._searchIdx].classList.remove('search-current');
       this._searchIdx = (this._searchIdx - 1 + this._searchMatches.length) % this._searchMatches.length;
-      const m = this._searchMatches[this._searchIdx];
-      m.classList.add('search-current');
-      m.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const match = this._searchMatches[this._searchIdx];
+      const row = this._getVisibleRowForLine(match.lineNum);
+      if (row >= 0) {
+        const container = document.getElementById('code-view');
+        container.scrollTop = Math.max(0, row * this.LINE_HEIGHT - container.clientHeight / 2);
+      }
       document.getElementById('code-search-count').textContent = `${this._searchIdx + 1}/${this._searchMatches.length}`;
     },
 
     clearSearch() {
       this._searchMatches = [];
       this._searchIdx = -1;
-      document.querySelectorAll('#code-view mark').forEach(m => {
-        const parent = m.parentNode;
-        parent.replaceChild(document.createTextNode(m.textContent), m);
-        parent.normalize();
-      });
+      this._searchQuery = '';
+      this._visibleStart = -1; this._visibleEnd = -1;
+      this._renderVisible();
       document.getElementById('code-search-count').textContent = '';
     },
 
@@ -1380,17 +1733,13 @@ const App = {
       let out = '';
       let i = 0;
       const len = code.length;
-
-      // Helper: peek ahead to check if char at offset matches
       const peek = (off) => off < len ? code[off] : '';
 
       while (i < len) {
-        // Line comment: // ...
         if (code[i] === '/' && peek(i + 1) === '/') {
           out += '<span class=cmt>' + code.substring(i) + '</span>';
           break;
         }
-        // Block comment: /* ... */ (within a single line)
         if (code[i] === '/' && peek(i + 1) === '*') {
           let j = i + 2;
           while (j < len - 1 && !(code[j] === '*' && code[j + 1] === '/')) j++;
@@ -1399,14 +1748,12 @@ const App = {
           i = j;
           continue;
         }
-        // HTML entities from esc(): &amp; &lt; &gt;
         if (code[i] === '&') {
           if (code.substring(i, i + 5) === '&amp;') { out += '&amp;'; i += 5; continue; }
           if (code.substring(i, i + 4) === '&lt;')  { out += '<span class=op>&lt;</span>';  i += 4; continue; }
           if (code.substring(i, i + 4) === '&gt;')  { out += '<span class=op>&gt;</span>';  i += 4; continue; }
           out += code[i]; i++; continue;
         }
-        // Backtick string
         if (code[i] === '`') {
           let j = i + 1;
           while (j < len && code[j] !== '`') j++;
@@ -1415,7 +1762,6 @@ const App = {
           i = j;
           continue;
         }
-        // Double-quote string
         if (code[i] === '"') {
           let j = i + 1;
           while (j < len && code[j] !== '"') { if (code[j] === '\\') j++; j++; }
@@ -1424,7 +1770,6 @@ const App = {
           i = j;
           continue;
         }
-        // Rune literal: 'x', '\n', '\''
         if (code[i] === "'" && i + 1 < len) {
           let j = i + 1;
           if (code[j] === '\\') j += 2; else j++;
@@ -1435,7 +1780,6 @@ const App = {
             continue;
           }
         }
-        // Number
         if (/[0-9]/.test(code[i]) && (i === 0 || /[^a-zA-Z_]/.test(code[i - 1]))) {
           let j = i;
           if (code[j] === '0' && (peek(j + 1) === 'x' || peek(j + 1) === 'X')) {
@@ -1453,32 +1797,27 @@ const App = {
               j++;
             }
           }
-          if (j < len && code[j] === 'i') j++; // imaginary
+          if (j < len && code[j] === 'i') j++;
           out += '<span class=num>' + code.substring(i, j) + '</span>';
           i = j;
           continue;
         }
-        // Identifier: keyword / type / function call / pkg.Func / plain
         if (/[a-zA-Z_]/.test(code[i])) {
           let j = i;
           while (j < len && /[a-zA-Z0-9_]/.test(code[j])) j++;
           const word = code.substring(i, j);
-          // Check what follows the identifier
           const after = code[j];
           if (KW.has(word)) {
             out += '<span class=kw>' + word + '</span>';
           } else if (TYP.has(word)) {
             out += '<span class=typ>' + word + '</span>';
           } else if (after === '(') {
-            // func call: name(
             out += '<span class=fn>' + word + '</span>';
           } else if (after === '.' && j + 1 < len && /[A-Za-z_]/.test(code[j + 1])) {
-            // Possible pkg.Ident pattern — peek at what the dotted ident is followed by
             let k = j + 1;
             while (k < len && /[a-zA-Z0-9_]/.test(code[k])) k++;
             const nextWord = code.substring(j + 1, k);
             if (!KW.has(nextWord) && !TYP.has(nextWord) && code[k] === '(') {
-              // pkg.Func( pattern
               out += '<span class=pkg>' + word + '</span>.<span class=fn>' + nextWord + '</span>';
               i = k;
               continue;
@@ -1491,7 +1830,6 @@ const App = {
           i = j;
           continue;
         }
-        // Multi-char operators
         let matched = false;
         for (const op of MULTI_OP) {
           if (code.substring(i, i + op.length) === op) {
@@ -1502,7 +1840,6 @@ const App = {
           }
         }
         if (matched) continue;
-        // Default: emit character
         out += code[i];
         i++;
       }
@@ -1733,6 +2070,7 @@ const App = {
       });
     },
 
+
     getMutedIds() { return App.state.muted.map(r => r.pattern); },
 
     addFunc(funcId) {
@@ -1740,7 +2078,7 @@ const App = {
         App.state.muted.push({ type: 'func', pattern: funcId });
         App.saveLocalState();
         this.renderList();
-        App.graph.loadProject();
+        App.graph.reloadCurrent();
       }
     },
 
@@ -1751,7 +2089,7 @@ const App = {
         App.state.muted.push({ type: 'package', pattern: pkg });
         App.saveLocalState();
         this.renderList();
-        App.graph.loadProject();
+        App.graph.reloadCurrent();
       }
     },
 
@@ -1773,7 +2111,7 @@ const App = {
           App.state.muted.splice(idx, 1);
           App.saveLocalState();
           this.renderList();
-          App.graph.loadProject();
+          App.graph.reloadCurrent();
         });
         container.appendChild(item);
       });

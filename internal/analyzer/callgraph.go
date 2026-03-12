@@ -3,23 +3,24 @@ package analyzer
 import (
 	"go/token"
 	"go/types"
+	"strings"
 
 	"github.com/haoran-shi/go-call-graph/internal/model"
-	"golang.org/x/tools/go/callgraph/cha"
+	"golang.org/x/tools/go/callgraph/vta"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
-// BuildCallGraph constructs a CHA call graph from the loaded packages and returns
+// BuildCallGraph constructs a VTA call graph from the loaded packages and returns
 // a serializable CallGraphData along with position info for SSA functions.
 func BuildCallGraph(pkgs []*packages.Package, fset *token.FileSet) (*model.CallGraphData, map[string]token.Position) {
 	// Build SSA program
 	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
 	prog.Build()
 
-	// Run CHA analysis
-	cg := cha.CallGraph(prog)
+	// Run VTA analysis (more precise than CHA for interface method calls)
+	cg := vta.CallGraph(ssautil.AllFunctions(prog), nil)
 
 	result := &model.CallGraphData{
 		Nodes: make(map[string]*model.CallGraphNode),
@@ -132,7 +133,7 @@ func bfsExpand(cg, result *model.CallGraphData, startID string, depth int, muted
 		}
 
 		// Don't expand into stdlib/external internals — treat them as leaf nodes
-		if cur.id != startID && isStdLib(cur.id) {
+		if cur.id != startID && isStdLib(funcIDToPkgPath(cur.id)) {
 			continue
 		}
 
@@ -255,6 +256,21 @@ func getOrCreateNode(cg *model.CallGraphData, funcID string) *model.CallGraphNod
 	node := &model.CallGraphNode{FuncID: funcID}
 	cg.Nodes[funcID] = node
 	return node
+}
+
+// funcIDToPkgPath extracts the package path from a function ID.
+// e.g. "fmt.Println" → "fmt", "net/http.Error" → "net/http",
+// "pkg/path.(Type).Method" → "pkg/path"
+func funcIDToPkgPath(funcID string) string {
+	// Method: "pkg/path.(Type).Method" → find ".("
+	if idx := strings.Index(funcID, ".("); idx != -1 {
+		return funcID[:idx]
+	}
+	// Plain function: "pkg/path.FuncName" → find last "."
+	if idx := strings.LastIndex(funcID, "."); idx != -1 {
+		return funcID[:idx]
+	}
+	return funcID
 }
 
 func appendUnique(slice []string, val string) []string {

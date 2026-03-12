@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -130,9 +129,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read source from disk
-	src, err := os.ReadFile(path)
-	if err != nil {
+	src, ok2 := s.fileCache[path]
+	if !ok2 {
 		http.Error(w, "failed to read file", http.StatusInternalServerError)
 		return
 	}
@@ -140,7 +138,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	resp := FileResponse{
 		Path:      fa.Path,
 		Package:   fa.Package,
-		Source:    string(src),
+		Source:    src,
 		Functions: fa.Functions,
 	}
 	writeJSON(w, resp)
@@ -203,7 +201,7 @@ func (s *Server) handleCallGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	depth := 2
+	depth := s.defaultDepth
 	if d := r.URL.Query().Get("depth"); d != "" {
 		if parsed, err := strconv.Atoi(d); err == nil && parsed > 0 {
 			depth = parsed
@@ -283,11 +281,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if textCount >= maxTextResults {
 			break
 		}
-		src, err := os.ReadFile(path)
-		if err != nil {
+		src, ok := s.fileCache[path]
+		if !ok {
 			continue
 		}
-		lines := strings.Split(string(src), "\n")
+		lines := strings.Split(src, "\n")
 		for i, line := range lines {
 			if textCount >= maxTextResults {
 				break
@@ -411,7 +409,5 @@ func extractLabelAndPkg(id string) (label, pkg string) {
 
 func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	enc.Encode(data)
+	json.NewEncoder(w).Encode(data)
 }

@@ -6,7 +6,9 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 
+	"github.com/haoran-shi/go-call-graph/internal/config"
 	"github.com/haoran-shi/go-call-graph/internal/model"
 )
 
@@ -15,19 +17,29 @@ var webFS embed.FS
 
 // Server serves the analysis results over HTTP.
 type Server struct {
-	analysis *model.ProjectAnalysis
-	port     int
-	dev      bool // serve from filesystem instead of embed
-	mux      *http.ServeMux
+	analysis     *model.ProjectAnalysis
+	port         int
+	dev          bool // serve from filesystem instead of embed
+	defaultDepth int
+	mux          *http.ServeMux
+	fileCache    map[string]string // preloaded file contents keyed by path
 }
 
 // New creates a new Server.
-func New(analysis *model.ProjectAnalysis, port int, dev bool) *Server {
+func New(analysis *model.ProjectAnalysis, cfg *config.Config) *Server {
 	s := &Server{
-		analysis: analysis,
-		port:     port,
-		dev:      dev,
-		mux:      http.NewServeMux(),
+		analysis:     analysis,
+		port:         cfg.Port,
+		dev:          cfg.Dev,
+		defaultDepth: cfg.Callgraph.DefaultDepth,
+		mux:          http.NewServeMux(),
+		fileCache:    make(map[string]string),
+	}
+	// Preload file contents into cache
+	for path := range analysis.Files {
+		if src, err := os.ReadFile(path); err == nil {
+			s.fileCache[path] = string(src)
+		}
 	}
 	s.registerRoutes()
 	return s

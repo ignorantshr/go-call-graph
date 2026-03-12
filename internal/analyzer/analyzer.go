@@ -8,18 +8,19 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/haoran-shi/go-call-graph/internal/config"
 	"github.com/haoran-shi/go-call-graph/internal/model"
 	"golang.org/x/tools/go/packages"
 )
 
 // Analyze loads and analyzes the Go project at the given directory.
-func Analyze(dir string) (*model.ProjectAnalysis, error) {
+func Analyze(appCfg *config.Config) (*model.ProjectAnalysis, error) {
 	// Resolve to absolute path for consistent file references
-	absDir, err := filepath.Abs(dir)
+	absDir, err := filepath.Abs(appCfg.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving directory: %w", err)
 	}
-	dir = absDir
+	dir := absDir
 
 	cfg := &packages.Config{
 		Mode: packages.NeedName |
@@ -70,6 +71,20 @@ func Analyze(dir string) (*model.ProjectAnalysis, error) {
 		}
 	}
 
+	// Build exclude dirs set (absolute paths)
+	excludeDirs := make([]string, 0, len(appCfg.Exclude))
+	for _, excl := range appCfg.Exclude {
+		abs := filepath.Join(dir, excl)
+		excludeDirs = append(excludeDirs, abs+string(filepath.Separator))
+	}
+
+	// Build log packages map from config
+	logPkgs := make(map[string]bool, len(appCfg.Classifier.LogPackages))
+	for _, p := range appCfg.Classifier.LogPackages {
+		logPkgs[p] = true
+	}
+	logPrefixes := appCfg.Classifier.LogFuncPrefixes
+
 	// Extract functions from AST
 	fset := pkgs[0].Fset
 	for _, pkg := range pkgs {
@@ -81,6 +96,17 @@ func Analyze(dir string) (*model.ProjectAnalysis, error) {
 				break
 			}
 			filePath := pkg.GoFiles[i]
+			// Skip files in excluded directories
+			excluded := false
+			for _, exclDir := range excludeDirs {
+				if strings.HasPrefix(filePath, exclDir) {
+					excluded = true
+					break
+				}
+			}
+			if excluded {
+				continue
+			}
 			src, err := os.ReadFile(filePath)
 			if err != nil {
 				continue
@@ -97,7 +123,7 @@ func Analyze(dir string) (*model.ProjectAnalysis, error) {
 					continue
 				}
 
-				block := buildFuncBlock(fset, fn, pkg, src)
+				block := buildFuncBlock(fset, fn, pkg, src, logPkgs, logPrefixes)
 				fa.Functions = append(fa.Functions, block)
 				result.Functions[block.ID] = block
 			}
@@ -116,7 +142,7 @@ func Analyze(dir string) (*model.ProjectAnalysis, error) {
 	return result, nil
 }
 
-func buildFuncBlock(fset *token.FileSet, fn *ast.FuncDecl, pkg *packages.Package, src []byte) *model.FuncBlock {
+func buildFuncBlock(fset *token.FileSet, fn *ast.FuncDecl, pkg *packages.Package, src []byte, logPkgs map[string]bool, logPrefixes []string) *model.FuncBlock {
 	startPos := fset.Position(fn.Pos())
 	endPos := fset.Position(fn.End())
 
@@ -148,7 +174,7 @@ func buildFuncBlock(fset *token.FileSet, fn *ast.FuncDecl, pkg *packages.Package
 	}
 
 	// Classify statements
-	block.Statements = ClassifyStatements(fset, fn, pkg.TypesInfo, src)
+	block.Statements = ClassifyStatements(fset, fn, pkg.TypesInfo, src, logPkgs, logPrefixes)
 
 	return block
 }

@@ -395,7 +395,25 @@ body {
   padding: 2px 8px;
 }
 
+#code-header #outline-toggle {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+#code-header #outline-toggle.active {
+  background: var(--accent-blue);
+  color: var(--bg-primary);
+  border-color: var(--accent-blue);
+}
+
 #code-view.locate-mode .func-block .func-body { cursor: crosshair; }
+
+#code-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
 
 #code-view {
   overflow-y: auto;
@@ -404,6 +422,32 @@ body {
   font-size: 12px;
   line-height: 1.6;
 }
+
+#code-outline {
+  width: 180px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+#code-outline.hidden { display: none; }
+
+.outline-item {
+  padding: 3px 8px 3px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.outline-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.outline-item.active { color: var(--accent-blue); background: rgba(137,180,250,0.1); }
+.outline-exported { font-weight: 600; }
+.outline-recv { color: var(--text-dim); font-size: 11px; }
 
 /* Function blocks in code view */
 .func-block {
@@ -450,6 +494,34 @@ body {
   color: var(--accent-yellow);
   font-size: 8px;
 }
+
+.fold-marker {
+  position: absolute;
+  left: 2px;
+  font-size: 8px;
+  color: var(--accent-blue);
+}
+
+.line-number.fold-start { color: var(--accent-blue); }
+
+.user-fold .fold-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.user-fold .fold-remove {
+  font-size: 14px;
+  color: var(--text-dim);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.user-fold .fold-remove:hover { color: var(--accent-red); }
+
+/* Virtual scrolling */
+.vscroll-spacer { position: relative; }
+.vscroll-content { position: absolute; left: 0; right: 0; }
 
 .line-code { flex: 1; white-space: pre; overflow-x: auto; }
 

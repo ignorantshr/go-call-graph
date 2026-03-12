@@ -10,33 +10,16 @@ import (
 	"github.com/haoran-shi/go-call-graph/internal/model"
 )
 
-// logPackages are package paths whose calls are classified as "log".
-var logPackages = map[string]bool{
-	"log":                           true,
-	"log/slog":                      true,
-	"go.uber.org/zap":               true,
-	"github.com/sirupsen/logrus":    true,
-	"github.com/rs/zerolog":         true,
-	"github.com/rs/zerolog/log":     true,
-}
-
-// logFuncPrefixes are function name prefixes that indicate logging.
-var logFuncPrefixes = []string{
-	"Log", "Debug", "Info", "Warn", "Error", "Fatal", "Panic",
-	"Printf", "Println", "Print",
-	"Debugf", "Infof", "Warnf", "Errorf", "Fatalf", "Panicf",
-	"Debugw", "Infow", "Warnw", "Errorw", "Fatalw",
-}
-
 // ClassifyStatements extracts and classifies statements from a function body.
-func ClassifyStatements(fset *token.FileSet, fn *ast.FuncDecl, info *types.Info, src []byte) []model.Statement {
+// logPkgs and logPrefixes control which calls are classified as "log".
+func ClassifyStatements(fset *token.FileSet, fn *ast.FuncDecl, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
 	if fn.Body == nil {
 		return nil
 	}
 
 	var stmts []model.Statement
 	for _, s := range fn.Body.List {
-		stmts = append(stmts, classifyStmt(fset, s, info, src)...)
+		stmts = append(stmts, classifyStmt(fset, s, info, src, logPkgs, logPrefixes)...)
 	}
 	return stmts
 }
@@ -68,7 +51,7 @@ func ComputeComplexity(fn *ast.FuncDecl) int {
 	return complexity
 }
 
-func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []byte) []model.Statement {
+func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
 	startPos := fset.Position(stmt.Pos())
 	endPos := fset.Position(stmt.End())
 	code := extractCode(src, stmt.Pos(), stmt.End(), fset)
@@ -83,7 +66,7 @@ func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []by
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		if call, ok := s.X.(*ast.CallExpr); ok {
-			return []model.Statement{classifyCall(base, call, info)}
+			return []model.Statement{classifyCall(base, call, info, logPkgs, logPrefixes)}
 		}
 
 	case *ast.DeferStmt:
@@ -98,7 +81,7 @@ func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []by
 		// Check if RHS contains a call expression
 		for _, rhs := range s.Rhs {
 			if call, ok := rhs.(*ast.CallExpr); ok {
-				classified := classifyCall(base, call, info)
+				classified := classifyCall(base, call, info, logPkgs, logPrefixes)
 				if classified.Category == model.CategoryLog {
 					return []model.Statement{classified}
 				}
@@ -140,7 +123,7 @@ func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []by
 	case *ast.BlockStmt:
 		var result []model.Statement
 		for _, inner := range s.List {
-			result = append(result, classifyStmt(fset, inner, info, src)...)
+			result = append(result, classifyStmt(fset, inner, info, src, logPkgs, logPrefixes)...)
 		}
 		return result
 	}
@@ -148,11 +131,11 @@ func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []by
 	return []model.Statement{base}
 }
 
-func classifyCall(base model.Statement, call *ast.CallExpr, info *types.Info) model.Statement {
+func classifyCall(base model.Statement, call *ast.CallExpr, info *types.Info, logPkgs map[string]bool, logPrefixes []string) model.Statement {
 	target := resolveCallTarget(call, info)
 	if target != nil {
 		base.CallTarget = target
-		if isLogCall(target) {
+		if isLogCall(target, logPkgs, logPrefixes) {
 			base.Category = model.CategoryLog
 			base.Foldable = true
 			return base
@@ -223,12 +206,12 @@ func resolveCallTarget(call *ast.CallExpr, info *types.Info) *model.CallTarget {
 	return nil
 }
 
-func isLogCall(target *model.CallTarget) bool {
-	if logPackages[target.Package] {
+func isLogCall(target *model.CallTarget, logPkgs map[string]bool, logPrefixes []string) bool {
+	if logPkgs[target.Package] {
 		return true
 	}
 	// Check for common log method names on any package
-	for _, prefix := range logFuncPrefixes {
+	for _, prefix := range logPrefixes {
 		if target.Function == prefix || strings.HasPrefix(target.Function, prefix) {
 			// Only match if the package looks like a logger
 			if strings.Contains(target.Package, "log") || strings.Contains(target.Package, "zap") {

@@ -1,0 +1,69 @@
+# go-call-graph 配置文件
+# 复制为 go-call-graph.yaml 并按需修改
+# CLI 参数优先级高于配置文件
+
+# 目标 Go 项目目录
+dir: "."
+
+# Web 服务端口
+port: 8080
+
+# 开发模式（从文件系统加载前端资源）
+dev: false
+
+# 排除目录（相对于 dir，不分析这些目录下的 Go 文件）
+exclude:
+  - vendor
+  - protocol
+#   - third_party
+
+# 调用图设置
+callgraph:
+  # 默认展开深度（前端请求不带 depth 参数时的后备值）
+  default_depth: 2
+
+# 日志调用识别
+#
+# 代码分析时，每条语句会被分类为不同类别（call、log、error_check、defer 等）。
+# 被识别为 "log" 的调用在代码视图中会被标记为可折叠，视觉上弱化处理，
+# 帮助开发者聚焦核心业务逻辑。
+#
+# 识别规则：
+#   1. 调用目标的包路径在 log_packages 列表中 → 直接判定为日志调用
+#   2. 调用目标的函数名匹配 log_func_prefixes 中的前缀，
+#      且包路径包含 "log" 或 "zap" → 判定为日志调用
+#   3. fmt.Print/Fprint/Sprint 系列始终视为日志调用
+#
+# 如果你的项目使用了自定义日志库（如 github.com/phuslu/log），
+# 请将其包路径添加到 log_packages 中，以获得正确的分类效果。
+classifier:
+  log_packages:
+    - "log"
+    - "log/slog"
+    - "go.uber.org/zap"
+    - "github.com/sirupsen/logrus"
+    - "github.com/rs/zerolog"
+    - "github.com/rs/zerolog/log"
+
+  log_func_prefixes:
+    - "Log"
+    - "Debug"
+    - "Info"
+    - "Warn"
+    - "Error"
+    - "Fatal"
+    - "Panic"
+    - "Printf"
+    - "Println"
+    - "Print"
+    - "Debugf"
+    - "Infof"
+    - "Warnf"
+    - "Errorf"
+    - "Fatalf"
+    - "Panicf"
+    - "Debugw"
+    - "Infow"
+    - "Warnw"
+    - "Errorw"
+    - "Fatalw"
