@@ -10,7 +10,7 @@ const App = {
     muted: [],
     bookmarkChainMode: false,
     cache: {},
-    graphData: null,        // current graph nodes/edges
+    graphData: null,        // kept for API compat
     stdlibIds: new Set(),   // set of known stdlib function IDs
     history: [],            // navigation history [{type, filePath, line, funcId}]
     historyIdx: -1,         // current position in history
@@ -23,11 +23,10 @@ const App = {
   async init() {
     this.loadLocalState();
     this.bindEvents();
+    this.chain.init();
     await this.tree.load();
     this.mute.renderList();
     this.bookmarks.renderList();
-    // Don't load full project graph at startup — too many nodes cause lag.
-    // Graph is shown when user clicks a function or double-clicks a node.
   },
 
   // ---- Persistence ----
@@ -116,7 +115,7 @@ const App = {
           this.codeView.render();
           return;
         }
-        this.graph.clearHighlights();
+        this.chain.clearHighlights();
         document.getElementById('search-results').classList.add('hidden');
         document.getElementById('context-menu').classList.add('hidden');
       } else if (e.key === '/' || (e.key === 'f' && (e.metaKey || e.ctrlKey))) {
@@ -211,24 +210,15 @@ const App = {
     this.codeView.trackScrollForOutline();
 
     // Toolbar
-    document.getElementById('fit-btn').addEventListener('click', () => this.graph.fitToView());
-
-    const depthSlider = document.getElementById('depth-slider');
-    depthSlider.addEventListener('input', () => {
-      document.getElementById('depth-value').textContent = depthSlider.value;
-    });
-    depthSlider.addEventListener('change', () => {
-      if (this.state.currentFuncId) this.graph.loadSubgraph(this.state.currentFuncId, parseInt(depthSlider.value));
-    });
-
-    document.getElementById('color-mode').addEventListener('change', () => this.graph.recolor());
+    document.getElementById('fit-btn').addEventListener('click', () => this.chain.fitToView());
+    document.getElementById('chain-reset-btn').addEventListener('click', () => this.chain.reset());
 
     // Bookmark chain
     document.getElementById('bookmark-chain-btn').addEventListener('click', (e) => {
       this.state.bookmarkChainMode = !this.state.bookmarkChainMode;
       e.target.classList.toggle('active', this.state.bookmarkChainMode);
       if (this.state.bookmarkChainMode) this.bookmarks.showChain();
-      else this.graph.clearHighlights();
+      else this.chain.clearHighlights();
     });
 
     // Context menu actions
@@ -250,7 +240,7 @@ const App = {
         this.state.muted.push({ type: 'pattern', pattern });
         this.saveLocalState();
         this.mute.renderList();
-        this.graph.reloadCurrent();
+        this.chain.reloadCurrent();
       }
     });
 
@@ -288,14 +278,7 @@ const App = {
   async selectFunc(funcId) {
     this.state.currentFuncId = funcId;
     this.pushHistory({ type: 'func', funcId });
-    // If node is already in current graph, just highlight; otherwise load subgraph
-    if (this.graph.nodeMap[funcId]) {
-      await this.graph.highlightNode(funcId);
-      this.graph.centerOnNode(funcId);
-    } else {
-      const depth = parseInt(document.getElementById('depth-slider').value);
-      await this.graph.loadSubgraph(funcId, depth);
-    }
+    await this.chain.activate(funcId);
     await this.showFuncCode(funcId);
     await this.infoPanel.show(funcId);
   },
@@ -332,181 +315,82 @@ const App = {
   },
 
   // ============================================================
-  //  GRAPH ENGINE (dagre hierarchical layout)
+  //  CHAIN VIEW (code-chain canvas replacing the old graph)
   // ============================================================
-  graph: {
-    nodes: [],        // {id, label, pkg, x, y, w, h, isStdLib, isExported, complexity}
-    edges: [],        // {from, to, fromNode, toNode, points}
-    nodeMap: {},      // id -> node
-    svg: null,
-    gEdges: null,
-    gNodes: null,
-    // View transform
+  chain: {
     vx: 0, vy: 0, vscale: 1,
-    // Drag state
-    dragNode: null,
-    isPanning: false,
-    panStart: null,
-    // Package color map
-    pkgColors: {},
-    colorIdx: 0,
+    isPanning: false, panStart: null,
     _eventsBound: false,
+    _dragBox: null,       // file-box being dragged
+    _dragStart: null,
+    fileBoxes: {},        // filePath → {el, x, y, fileData, _userPositioned, funcEls:{}}
+    activeChains: new Set(),
+    arrowData: [],        // [{fromFuncId, toFuncId, fromFilePath, toFilePath, fromLine?, el}]
+    canvas: null,
+    svgOverlay: null,
+    container: null,
 
-    PALETTE: [
-      '#89b4fa','#a6e3a1','#f9e2af','#cba6f7','#94e2d5',
-      '#f38ba8','#fab387','#89dceb','#b4befe','#f2cdcd',
-    ],
-
-    // Track what's currently displayed so mute changes can refresh
-    _currentFuncId: null,
-
-    async loadSubgraph(funcId, depth) {
-      try {
-        this._currentFuncId = funcId;
-        const muted = App.mute.getMutedIds().join(',');
-        const url = `/api/callgraph?func=${encodeURIComponent(funcId)}&depth=${depth}${muted ? '&muted=' + encodeURIComponent(muted) : ''}`;
-        delete App.state.cache[url];
-        const data = await App.api(url);
-        this.setData(data);
-        this.highlightNode(funcId);
-      } catch (e) { console.error('Failed to load subgraph:', e); }
+    init() {
+      this.container = document.getElementById('chain-container');
+      this.canvas = document.getElementById('chain-canvas');
+      this.svgOverlay = document.getElementById('chain-svg');
+      this._bindEvents();
     },
 
-    reloadCurrent() {
-      if (this._currentFuncId) {
-        const depth = parseInt(document.getElementById('depth-slider').value);
-        this.loadSubgraph(this._currentFuncId, depth);
-      }
-    },
-
-    setData(data) {
-      if (!data.nodes) data.nodes = [];
-      if (!data.edges) data.edges = [];
-
-      data.nodes.forEach(n => {
-        if (n.isStdLib) App.state.stdlibIds.add(n.id);
-      });
-
-      App.state.graphData = data;
-
-      const mutedSet = new Set();
-      data.nodes = data.nodes.filter(n => {
-        if (App.mute.isMatch(n.id)) { mutedSet.add(n.id); return false; }
-        return true;
-      });
-      data.edges = data.edges.filter(e => !mutedSet.has(e.from) && !mutedSet.has(e.to));
-
-      this.buildGraph(data);
-      this.initSVG();
-      this.renderPositions();
-      this.fitToView();
-    },
-
-    buildGraph(data) {
-      this.pkgColors = {};
-      this.colorIdx = 0;
-      this.nodeMap = {};
-
-      const pkgSet = new Set(data.nodes.map(n => n.package || 'default'));
-      for (const pkg of pkgSet) {
-        this.pkgColors[pkg] = this.PALETTE[this.colorIdx % this.PALETTE.length];
-        this.colorIdx++;
-      }
-
-      // Create dagre graph
-      const g = new dagre.graphlib.Graph();
-      g.setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 80, edgesep: 20 });
-      g.setDefaultEdgeLabel(() => ({}));
-
-      this.nodes = [];
-      data.nodes.forEach(n => {
-        const labelLen = Math.max(n.label.length, 4);
-        const w = labelLen * 8 + 24;
-        const h = 30;
-        g.setNode(n.id, { width: w, height: h });
-        const node = {
-          id: n.id, label: n.label,
-          pkg: n.package || '', isStdLib: n.isStdLib,
-          isExported: n.isExported, complexity: n.complexity || 1,
-          x: 0, y: 0, w, h,
-        };
-        this.nodes.push(node);
-        this.nodeMap[n.id] = node;
-      });
-
-      this.edges = [];
-      data.edges.forEach(e => {
-        const from = this.nodeMap[e.from];
-        const to = this.nodeMap[e.to];
-        if (from && to) {
-          g.setEdge(e.from, e.to);
-          this.edges.push({ from: e.from, to: e.to, fromNode: from, toNode: to });
-        }
-      });
-
-      // Run dagre layout synchronously (fast for subgraphs)
-      dagre.layout(g);
-
-      this.nodes.forEach(node => {
-        const ln = g.node(node.id);
-        if (ln) { node.x = ln.x; node.y = ln.y; }
-      });
-
-      this.edges.forEach(edge => {
-        const le = g.edge(edge.from, edge.to);
-        if (le) edge.points = le.points;
-      });
-    },
-
-    // Bind global pan/zoom/drag events once
-    _bindGlobalEvents() {
+    _bindEvents() {
       if (this._eventsBound) return;
       this._eventsBound = true;
-      const container = document.getElementById('graph-container');
-      const svg = document.getElementById('graph-svg');
+      const container = this.container;
 
+      // Pan on empty area
       container.addEventListener('mousedown', (e) => {
-        if (e.target === svg || e.target === container) {
+        // Only pan if clicking on container/svg/hint (not on file boxes)
+        if (e.target === container || e.target === this.svgOverlay ||
+            e.target.id === 'chain-empty-hint' || e.target.tagName === 'svg') {
           this.isPanning = true;
-          this.panStart = { x: e.clientX, y: e.clientY, vx: this.vx, vy: this.vy };
           this._panDist = 0;
+          this.panStart = { x: e.clientX, y: e.clientY, vx: this.vx, vy: this.vy };
           container.classList.add('grabbing');
         }
       });
 
       window.addEventListener('mousemove', (e) => {
-        if (this.dragNode) {
-          const pt = this.screenToWorld(e.clientX, e.clientY);
-          this.dragNode.x = pt.x;
-          this.dragNode.y = pt.y;
-          if (this.dragNode._dragStart) {
-            const dx = e.clientX - this.dragNode._dragStart.x;
-            const dy = e.clientY - this.dragNode._dragStart.y;
-            this.dragNode._dragDist = Math.sqrt(dx * dx + dy * dy);
-          }
-          this.renderPositions();
-        } else if (this.isPanning && this.panStart) {
+        if (this._dragBox) {
+          const dx = (e.clientX - this._dragStart.mx) / this.vscale;
+          const dy = (e.clientY - this._dragStart.my) / this.vscale;
+          this._dragBox.x = this._dragStart.bx + dx;
+          this._dragBox.y = this._dragStart.by + dy;
+          this._dragBox.el.style.left = this._dragBox.x + 'px';
+          this._dragBox.el.style.top = this._dragBox.y + 'px';
+          this._dragBox._userPositioned = true;
+          this._updateArrows();
+          return;
+        }
+        if (this.isPanning && this.panStart) {
           const dx = e.clientX - this.panStart.x;
           const dy = e.clientY - this.panStart.y;
           this._panDist = Math.sqrt(dx * dx + dy * dy);
           this.vx = this.panStart.vx + dx;
           this.vy = this.panStart.vy + dy;
-          this.updateViewBox();
+          this._applyTransform();
         }
       });
 
       window.addEventListener('mouseup', () => {
-        if (this.dragNode) {
-          this.dragNode = null;
+        if (this._dragBox) {
+          this._dragBox = null;
+          this._dragStart = null;
         }
         if (this.isPanning) {
           this.isPanning = false;
-          document.getElementById('graph-container').classList.remove('grabbing');
+          container.classList.remove('grabbing');
           this.panStart = null;
         }
       });
 
+      // Zoom toward mouse — but let file boxes scroll natively
       container.addEventListener('wheel', (e) => {
+        if (e.target.closest('.file-box')) return; // let native scroll handle it
         e.preventDefault();
         e.stopPropagation();
         const rect = container.getBoundingClientRect();
@@ -520,324 +404,580 @@ const App = {
         this.vx = mx - (mx - this.vx) * (this.vscale / oldScale);
         this.vy = my - (my - this.vy) * (this.vscale / oldScale);
 
-        this.updateViewBox();
+        this._applyTransform();
         document.getElementById('zoom-level').textContent = Math.round(this.vscale * 100) + '%';
-
       }, { passive: false });
-
-      svg.addEventListener('click', () => {
-        if (this._panDist > 5) return;
-        this.clearHighlights();
-        App.state.currentFuncId = null;
-      });
     },
 
-    initSVG() {
-      this._bindGlobalEvents();
-      const svg = document.getElementById('graph-svg');
-      this.svg = svg;
-      svg.innerHTML = '';
+    _applyTransform() {
+      this.canvas.style.transform = `translate(${this.vx}px, ${this.vy}px) scale(${this.vscale})`;
+      this._updateArrows();
+    },
 
-      const ns = 'http://www.w3.org/2000/svg';
-      const defs = document.createElementNS(ns, 'defs');
+    // ---- File box management ----
+    async _ensureFileBox(filePath) {
+      if (this.fileBoxes[filePath]) return this.fileBoxes[filePath];
 
-      ['default','caller','callee'].forEach(type => {
-        const marker = document.createElementNS(ns, 'marker');
-        marker.setAttribute('id', 'arrow-' + type);
-        marker.setAttribute('viewBox', '0 0 10 10');
-        marker.setAttribute('refX', '10');
-        marker.setAttribute('refY', '5');
-        marker.setAttribute('markerWidth', '8');
-        marker.setAttribute('markerHeight', '8');
-        marker.setAttribute('orient', 'auto-start-reverse');
-        const path = document.createElementNS(ns, 'path');
-        path.setAttribute('d', 'M 0 1 L 10 5 L 0 9 z');
-        const colors = { default: '#3b3e52', caller: '#89b4fa', callee: '#a6e3a1' };
-        path.setAttribute('fill', colors[type]);
-        marker.appendChild(path);
-        defs.appendChild(marker);
+      // Hide empty hint
+      const hint = document.getElementById('chain-empty-hint');
+      if (hint) hint.style.display = 'none';
+
+      const fileData = await App.api('/api/file?path=' + encodeURIComponent(filePath));
+
+      const box = document.createElement('div');
+      box.className = 'file-box';
+
+      // Header
+      const header = document.createElement('div');
+      header.className = 'file-box-header';
+      const fname = document.createElement('span');
+      fname.className = 'file-name';
+      fname.textContent = filePath.split('/').slice(-2).join('/');
+      fname.title = filePath;
+      header.appendChild(fname);
+      const closeBtn = document.createElement('span');
+      closeBtn.className = 'file-close';
+      closeBtn.textContent = '\u00d7';
+      closeBtn.title = 'Close';
+      closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._removeFileBox(filePath);
+      });
+      header.appendChild(closeBtn);
+      box.appendChild(header);
+
+      // Drag via header
+      header.addEventListener('mousedown', (e) => {
+        if (e.target === closeBtn) return;
+        e.stopPropagation();
+        const fb = this.fileBoxes[filePath];
+        this._dragBox = fb;
+        this._dragStart = { mx: e.clientX, my: e.clientY, bx: fb.x, by: fb.y };
       });
 
-      svg.appendChild(defs);
+      // Func list
+      const funcList = document.createElement('div');
+      funcList.className = 'file-box-funcs';
+      funcList.addEventListener('scroll', () => this._updateArrows());
 
-      this.gEdges = document.createElementNS(ns, 'g');
-      this.gEdges.setAttribute('class', 'edges-layer');
-      svg.appendChild(this.gEdges);
+      const funcEls = {};
+      const funcs = fileData.functions ? [...fileData.functions].sort((a, b) => a.startLine - b.startLine) : [];
 
-      this.gNodes = document.createElementNS(ns, 'g');
-      this.gNodes.setAttribute('class', 'nodes-layer');
-      svg.appendChild(this.gNodes);
+      for (const fn of funcs) {
+        if (App.mute.isMatch(fn.id)) continue;
+        const block = document.createElement('div');
+        block.className = 'func-block-chain';
+        block.dataset.funcId = fn.id;
 
-      // Create edge elements
-      this.edges.forEach(edge => {
-        const path = document.createElementNS(ns, 'path');
-        path.setAttribute('class', 'graph-edge');
-        path.setAttribute('marker-end', 'url(#arrow-default)');
-        path.dataset.from = edge.from;
-        path.dataset.to = edge.to;
-        edge.el = path;
-        this.gEdges.appendChild(path);
+        const hdr = document.createElement('div');
+        hdr.className = 'func-header-chain';
+        const sig = document.createElement('span');
+        sig.className = 'func-sig';
+        sig.textContent = fn.signature || fn.name;
+        sig.title = fn.id;
+        hdr.appendChild(sig);
+
+        const actBtn = document.createElement('button');
+        actBtn.className = 'activate-btn';
+        actBtn.textContent = '+';
+        actBtn.title = 'Load call chain';
+        actBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          App.selectFunc(fn.id);
+        });
+        hdr.appendChild(actBtn);
+        block.appendChild(hdr);
+
+        // Collapsible body (code)
+        const body = document.createElement('div');
+        body.className = 'func-body-chain';
+        body.addEventListener('scroll', () => this._updateArrows());
+        block.appendChild(body);
+
+        // Drag handle to resize code area height
+        const bodyResize = document.createElement('div');
+        bodyResize.className = 'func-body-resize';
+        bodyResize.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          bodyResize.classList.add('active');
+          const startY = e.clientY;
+          const startH = body.offsetHeight;
+          const onMove = (ev) => {
+            const dy = (ev.clientY - startY) / this.vscale;
+            const newH = Math.max(34, startH + dy);
+            body.style.maxHeight = newH + 'px';
+            body.style.height = newH + 'px';
+            this._updateArrows();
+          };
+          const onUp = () => {
+            bodyResize.classList.remove('active');
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        });
+        block.appendChild(bodyResize);
+
+        // Click header to toggle expand
+        hdr.addEventListener('click', (e) => {
+          if (e.target === actBtn) return;
+          block.classList.toggle('expanded');
+          if (block.classList.contains('expanded') && body.childElementCount === 0) {
+            this._renderFuncBody(body, fn, fileData);
+          }
+          // Re-layout arrows after expand/collapse
+          requestAnimationFrame(() => this._updateArrows());
+        });
+
+        funcList.appendChild(block);
+        funcEls[fn.id] = block;
+      }
+
+      box.appendChild(funcList);
+
+      // Custom resize handle (larger grab area)
+      const resizeGrip = document.createElement('div');
+      resizeGrip.className = 'file-box-resize';
+      resizeGrip.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        resizeGrip.classList.add('active');
+        const startX = e.clientX, startY = e.clientY;
+        const startW = box.offsetWidth, startH = box.offsetHeight;
+        const onMove = (ev) => {
+          const dxR = (ev.clientX - startX) / this.vscale;
+          const dyR = (ev.clientY - startY) / this.vscale;
+          box.style.width = Math.max(280, startW + dxR) + 'px';
+          box.style.height = Math.max(80, startH + dyR) + 'px';
+        };
+        const onUp = () => {
+          resizeGrip.classList.remove('active');
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          this._updateArrows();
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
       });
+      box.appendChild(resizeGrip);
 
-      // Create node elements
-      const colorMode = document.getElementById('color-mode').value;
-      this.nodes.forEach(node => {
-        const g = document.createElementNS(ns, 'g');
-        g.setAttribute('class', 'graph-node');
-        g.dataset.funcId = node.id;
+      this.canvas.appendChild(box);
 
-        const rect = document.createElementNS(ns, 'rect');
-        rect.setAttribute('width', node.w);
-        rect.setAttribute('height', node.h);
-        rect.setAttribute('rx', '6');
-        rect.setAttribute('fill', this.getNodeFill(node, colorMode));
-        rect.setAttribute('stroke', this.getNodeStroke(node));
-        if (node.isStdLib) rect.setAttribute('stroke-dasharray', '4,3');
+      // Re-draw arrows when the box is resized by the user
+      const ro = new ResizeObserver(() => this._updateArrows());
+      ro.observe(box);
 
-        const text = document.createElementNS(ns, 'text');
-        text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('dominant-baseline', 'central');
-        text.setAttribute('fill', node.isStdLib ? '#585b70' : '#cdd6f4');
-        text.setAttribute('font-size', node.isStdLib ? '10' : '12');
-        text.textContent = node.label.length > 18 ? node.label.substring(0, 16) + '..' : node.label;
+      const fbObj = {
+        el: box, x: 0, y: 0, fileData, filePath,
+        _userPositioned: false,
+        funcEls, _resizeObserver: ro,
+      };
+      this.fileBoxes[filePath] = fbObj;
+      return fbObj;
+    },
 
-        g.appendChild(rect);
-        g.appendChild(text);
-        node.el = g;
-        node.rectEl = rect;
-        node.textEl = text;
+    _renderFuncBody(body, fn, fileData) {
+      const sourceLines = fileData.source.split('\n');
+      // Build call-target map for this function
+      const callTargets = {};
+      if (fn.statements) {
+        for (const stmt of fn.statements) {
+          if (stmt.callTarget && stmt.startLine) {
+            const t = stmt.callTarget;
+            const cls = t.isStdLib ? 'call-link stdlib' : (t.isExternal ? 'call-link external' : 'call-link');
+            const escaped = App.codeView.esc(t.function);
+            callTargets[stmt.startLine] = {
+              cls, escaped,
+              linkHtml: `<span class="${cls}" data-func-id="${App.codeView.esc(t.funcId)}" title="${App.codeView.esc(t.funcId)}">${escaped}</span>`,
+            };
+          }
+        }
+      }
+      for (let line = fn.startLine; line <= fn.endLine; line++) {
+        if (line < 1 || line > sourceLines.length) continue;
+        const el = document.createElement('div');
+        el.className = 'chain-code-line';
+        el.dataset.line = line;
+        let codeHtml = App.codeView.highlightSyntax(App.codeView.esc(sourceLines[line - 1]));
+        const ct = callTargets[line];
+        if (ct) {
+          const idx = codeHtml.indexOf(ct.escaped);
+          if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+        }
+        el.innerHTML = `<span class="chain-line-num">${line}</span><span class="chain-line-code">${codeHtml}</span>`;
+        body.appendChild(el);
+      }
 
-        g.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (node._dragDist > 5) return;
-          // Delay single-click so double-click can cancel it
-          clearTimeout(node._clickTimer);
-          node._clickTimer = setTimeout(() => App.selectFunc(node.id), 250);
-        });
-
-        g.addEventListener('dblclick', (e) => {
-          e.stopPropagation();
-          clearTimeout(node._clickTimer);
-          App.state.currentFuncId = node.id;
-          const depth = parseInt(document.getElementById('depth-slider').value);
-          this.loadSubgraph(node.id, depth);
-        });
-
-        g.addEventListener('contextmenu', (e) => {
+      // Wire up call-links inside chain body
+      body.addEventListener('click', (e) => {
+        const link = e.target.closest('.call-link');
+        if (link) {
           e.preventDefault();
           e.stopPropagation();
-          App.showContextMenu(e, node.id);
-        });
-
-        g.addEventListener('mouseenter', (e) => {
-          const tip = document.getElementById('tooltip');
-          tip.textContent = `${node.id}\nPkg: ${node.pkg}\nComplexity: ${node.complexity}`;
-          tip.style.left = (e.clientX + 12) + 'px';
-          tip.style.top = (e.clientY + 12) + 'px';
-          tip.classList.remove('hidden');
-        });
-
-        g.addEventListener('mouseleave', () => {
-          document.getElementById('tooltip').classList.add('hidden');
-        });
-
-        g.addEventListener('mousedown', (e) => {
-          if (e.button !== 0) return;
-          e.stopPropagation();
-          this.dragNode = node;
-          node._dragStart = { x: e.clientX, y: e.clientY };
-          node._dragDist = 0;
-        });
-
-        this.gNodes.appendChild(g);
+          const funcId = link.dataset.funcId;
+          if (funcId) App.selectFunc(funcId);
+        }
       });
     },
 
-    screenToWorld(sx, sy) {
-      const container = document.getElementById('graph-container');
-      const rect = container.getBoundingClientRect();
-      return {
-        x: (sx - rect.left - this.vx) / this.vscale,
-        y: (sy - rect.top - this.vy) / this.vscale,
-      };
+    _expandFunc(filePath, funcId, role) {
+      const fb = this.fileBoxes[filePath];
+      if (!fb) return;
+      const block = fb.funcEls[funcId];
+      if (!block) return;
+
+      // Expand and render body
+      block.classList.add('expanded');
+      block.classList.remove('active-func', 'caller-func', 'callee-func', 'dimmed');
+      block.classList.add(role);
+
+      const body = block.querySelector('.func-body-chain');
+      if (body && body.childElementCount === 0) {
+        const fn = fb.fileData.functions.find(f => f.id === funcId);
+        if (fn) this._renderFuncBody(body, fn, fb.fileData);
+      }
     },
 
-    updateViewBox() {
-      const container = document.getElementById('graph-container');
-      const w = container.clientWidth;
-      const h = container.clientHeight;
-      const viewX = -this.vx / this.vscale;
-      const viewY = -this.vy / this.vscale;
-      const viewW = w / this.vscale;
-      const viewH = h / this.vscale;
-      this.svg.setAttribute('viewBox', `${viewX} ${viewY} ${viewW} ${viewH}`);
+    _collapseAllExcept(activeFuncIds) {
+      const activeSet = new Set(activeFuncIds);
+      for (const fb of Object.values(this.fileBoxes)) {
+        for (const [fid, block] of Object.entries(fb.funcEls)) {
+          if (!activeSet.has(fid)) {
+            block.classList.add('dimmed');
+          }
+        }
+      }
+    },
+
+    _removeFileBox(filePath) {
+      const fb = this.fileBoxes[filePath];
+      if (!fb) return;
+      if (fb._resizeObserver) fb._resizeObserver.disconnect();
+      fb.el.remove();
+      delete this.fileBoxes[filePath];
+      // Remove arrows related to this file
+      this.arrowData = this.arrowData.filter(a => {
+        if (a.fromFilePath === filePath || a.toFilePath === filePath) {
+          if (a.el) a.el.remove();
+          return false;
+        }
+        return true;
+      });
+      // Remove active chains for funcs in this file
+      for (const fid of [...this.activeChains]) {
+        // Remove if belongs to this file (check in arrowData not needed, just cleanup)
+      }
+      this._updateArrows();
+      // Show hint if canvas empty
+      if (Object.keys(this.fileBoxes).length === 0) {
+        const hint = document.getElementById('chain-empty-hint');
+        if (hint) hint.style.display = '';
+      }
+    },
+
+    // ---- dagre layout for file boxes ----
+    _layoutFileBoxes() {
+      const entries = Object.entries(this.fileBoxes);
+      if (entries.length === 0) return;
+
+      const g = new dagre.graphlib.Graph();
+      g.setGraph({ rankdir: 'LR', nodesep: 40, ranksep: 80, edgesep: 20 });
+      g.setDefaultEdgeLabel(() => ({}));
+
+      // Measure each file box
+      for (const [fp, fb] of entries) {
+        const w = fb.el.offsetWidth || 300;
+        const h = fb.el.offsetHeight || 100;
+        g.setNode(fp, { width: w, height: h });
+      }
+
+      // Add cross-file edges
+      const addedEdges = new Set();
+      for (const arrow of this.arrowData) {
+        if (arrow.fromFilePath !== arrow.toFilePath) {
+          const key = arrow.fromFilePath + '->' + arrow.toFilePath;
+          if (!addedEdges.has(key)) {
+            addedEdges.add(key);
+            g.setEdge(arrow.fromFilePath, arrow.toFilePath);
+          }
+        }
+      }
+
+      dagre.layout(g);
+
+      for (const [fp, fb] of entries) {
+        if (fb._userPositioned) continue;
+        const ln = g.node(fp);
+        if (ln) {
+          fb.x = ln.x - (fb.el.offsetWidth || 300) / 2;
+          fb.y = ln.y - (fb.el.offsetHeight || 100) / 2;
+          fb.el.style.left = fb.x + 'px';
+          fb.el.style.top = fb.y + 'px';
+        }
+      }
+    },
+
+    // ---- Arrow rendering ----
+
+    // Compute the visible Y-center of an element, clamped to the
+    // intersection of its scrollable ancestors' visible rects.
+    // ancestor chain: element → .func-body-chain → .file-box-funcs → .file-box
+    _visibleYCenter(el, fileBoxEl) {
+      const elRect = el.getBoundingClientRect();
+      let top = elRect.top;
+      let bottom = elRect.bottom;
+
+      // Clamp to .func-body-chain (inner scroll container)
+      const body = el.closest('.func-body-chain');
+      if (body) {
+        const br = body.getBoundingClientRect();
+        top = Math.max(top, br.top);
+        bottom = Math.min(bottom, br.bottom);
+      }
+
+      // Clamp to .file-box-funcs (outer scroll container)
+      const funcs = el.closest('.file-box-funcs');
+      if (funcs) {
+        const fr = funcs.getBoundingClientRect();
+        top = Math.max(top, fr.top);
+        bottom = Math.min(bottom, fr.bottom);
+      }
+
+      // If element is fully clipped (scrolled out of view),
+      // snap to the nearest edge of the visible code area.
+      if (top >= bottom) {
+        const rawMid = (elRect.top + elRect.bottom) / 2;
+        const clipRect = (funcs || fileBoxEl).getBoundingClientRect();
+        return rawMid < clipRect.top ? clipRect.top : clipRect.bottom;
+      }
+
+      return (top + bottom) / 2;
+    },
+
+    _updateArrows() {
+      const svg = this.svgOverlay;
+      if (!svg) return;
+      const container = this.container;
+      const containerRect = container.getBoundingClientRect();
+
+      // Remove old path elements (keep defs)
+      svg.querySelectorAll('path.chain-arrow').forEach(p => p.remove());
+
+      const ns = 'http://www.w3.org/2000/svg';
+
+      for (const arrow of this.arrowData) {
+        const fromFb = this.fileBoxes[arrow.fromFilePath];
+        const toFb = this.fileBoxes[arrow.toFilePath];
+        if (!fromFb || !toFb) continue;
+
+        const fromBlock = fromFb.funcEls[arrow.fromFuncId];
+        const toBlock = toFb.funcEls[arrow.toFuncId];
+        if (!fromBlock || !toBlock) continue;
+
+        // Source: specific call-site line, fallback to func header
+        let fromEl = null;
+        if (arrow.fromLine && fromBlock.classList.contains('expanded')) {
+          fromEl = fromBlock.querySelector(`.chain-code-line[data-line="${arrow.fromLine}"]`);
+        }
+        if (!fromEl) fromEl = fromBlock.querySelector('.func-header-chain');
+        if (!fromEl) fromEl = fromBlock;
+
+        // Target: function signature header
+        let toEl = toBlock.querySelector('.func-header-chain');
+        if (!toEl) toEl = toBlock;
+
+        // Compute Y clamped to the visible code area
+        const y1 = this._visibleYCenter(fromEl, fromFb.el) - containerRect.top;
+        const y2 = this._visibleYCenter(toEl, toFb.el) - containerRect.top;
+
+        // Determine whether arrow goes left-to-right or right-to-left
+        const fromBoxRect = fromFb.el.getBoundingClientRect();
+        const toBoxRect = toFb.el.getBoundingClientRect();
+        const goRight = fromBoxRect.right <= toBoxRect.left + 20;
+
+        let x1, x2;
+        if (goRight) {
+          x1 = fromBoxRect.right - containerRect.left;
+          x2 = toBoxRect.left - containerRect.left;
+        } else {
+          x1 = fromBoxRect.left - containerRect.left;
+          x2 = toBoxRect.right - containerRect.left;
+        }
+
+        // Bezier control points
+        const dx = Math.max(Math.abs(x2 - x1) * 0.4, 30);
+        const cx1 = goRight ? x1 + dx : x1 - dx;
+        const cx2 = goRight ? x2 - dx : x2 + dx;
+        const d = `M ${x1} ${y1} C ${cx1} ${y1}, ${cx2} ${y2}, ${x2} ${y2}`;
+
+        const path = document.createElementNS(ns, 'path');
+        path.setAttribute('class', 'chain-arrow');
+        path.setAttribute('d', d);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', '#a6e3a1');
+        path.setAttribute('stroke-width', '1.5');
+        path.setAttribute('marker-end', 'url(#arrow-chain)');
+        svg.appendChild(path);
+        arrow.el = path;
+      }
+    },
+
+    // ---- Core: activate a function ----
+    async activate(funcId) {
+      this.activeChains.add(funcId);
+
+      try {
+        const data = await App.api('/api/func?id=' + encodeURIComponent(funcId));
+        const filePath = data.filePath;
+        if (!filePath) return;
+
+        // Ensure file box for the activated function
+        await this._ensureFileBox(filePath);
+        this._expandFunc(filePath, funcId, 'active-func');
+
+        const allActiveFuncIds = [funcId];
+
+        // Process callees from statements
+        const calleePromises = [];
+        if (data.statements) {
+          for (const stmt of data.statements) {
+            if (!stmt.callTarget) continue;
+            const t = stmt.callTarget;
+            if (App.mute.isMatch(t.funcId)) continue;
+            if (t.isStdLib || t.isExternal) continue;
+            const calleeFilePath = t.filePath;
+            if (!calleeFilePath) continue;
+
+            calleePromises.push((async () => {
+              await this._ensureFileBox(calleeFilePath);
+              this._expandFunc(calleeFilePath, t.funcId, 'callee-func');
+              allActiveFuncIds.push(t.funcId);
+              // Add arrow — fromLine = the call-site line
+              if (!this.arrowData.some(a => a.fromFuncId === funcId && a.toFuncId === t.funcId)) {
+                this.arrowData.push({
+                  fromFuncId: funcId, toFuncId: t.funcId,
+                  fromFilePath: filePath, toFilePath: calleeFilePath,
+                  fromLine: stmt.startLine,
+                });
+              }
+            })());
+          }
+        }
+
+        // Process callers — need to fetch each for filePath
+        const callerPromises = [];
+        if (data.callers) {
+          for (const callerId of data.callers) {
+            if (App.mute.isMatch(callerId)) continue;
+            callerPromises.push((async () => {
+              try {
+                const callerData = await App.api('/api/func?id=' + encodeURIComponent(callerId));
+                if (!callerData.filePath) return;
+                await this._ensureFileBox(callerData.filePath);
+                this._expandFunc(callerData.filePath, callerId, 'caller-func');
+                allActiveFuncIds.push(callerId);
+                if (!this.arrowData.some(a => a.fromFuncId === callerId && a.toFuncId === funcId)) {
+                  // Find the call-site line in the caller's statements
+                  let callLine = null;
+                  if (callerData.statements) {
+                    for (const s of callerData.statements) {
+                      if (s.callTarget && s.callTarget.funcId === funcId && s.startLine) {
+                        callLine = s.startLine; break;
+                      }
+                    }
+                  }
+                  this.arrowData.push({
+                    fromFuncId: callerId, toFuncId: funcId,
+                    fromFilePath: callerData.filePath, toFilePath: filePath,
+                    fromLine: callLine,
+                  });
+                }
+              } catch {}
+            })());
+          }
+        }
+
+        await Promise.all([...calleePromises, ...callerPromises]);
+
+        this._collapseAllExcept(allActiveFuncIds);
+        this._layoutFileBoxes();
+
+        // Need a frame for layout to settle before measuring for arrows
+        await new Promise(r => requestAnimationFrame(r));
+        this._updateArrows();
+        this.fitToView();
+      } catch (e) {
+        console.error('Chain activate error:', e);
+      }
+    },
+
+    reloadCurrent() {
+      if (this.activeChains.size === 0) return;
+      // Clear and re-activate all
+      const funcs = [...this.activeChains];
+      this.reset();
+      funcs.forEach(fid => this.activate(fid));
     },
 
     fitToView() {
-      if (this.nodes.length === 0) return;
-      const container = document.getElementById('graph-container');
-      const W = container.clientWidth;
-      const H = container.clientHeight;
+      const entries = Object.values(this.fileBoxes);
+      if (entries.length === 0) return;
+
+      const W = this.container.clientWidth;
+      const H = this.container.clientHeight;
       if (!W || !H) return;
 
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      this.nodes.forEach(n => {
-        if (!isFinite(n.x) || !isFinite(n.y)) return;
-        minX = Math.min(minX, n.x - n.w / 2);
-        minY = Math.min(minY, n.y - n.h / 2);
-        maxX = Math.max(maxX, n.x + n.w / 2);
-        maxY = Math.max(maxY, n.y + n.h / 2);
-      });
-      if (!isFinite(minX)) return; // all nodes have bad positions
+      for (const fb of entries) {
+        const w = fb.el.offsetWidth || 300;
+        const h = fb.el.offsetHeight || 100;
+        minX = Math.min(minX, fb.x);
+        minY = Math.min(minY, fb.y);
+        maxX = Math.max(maxX, fb.x + w);
+        maxY = Math.max(maxY, fb.y + h);
+      }
+      if (!isFinite(minX)) return;
 
-      const pad = 60;
+      const pad = 40;
       const gw = maxX - minX + pad * 2;
       const gh = maxY - minY + pad * 2;
-      this.vscale = Math.min(W / gw, H / gh, 2);
+      this.vscale = Math.min(W / gw, H / gh, 1.5);
       this.vx = (W - gw * this.vscale) / 2 - (minX - pad) * this.vscale;
       this.vy = (H - gh * this.vscale) / 2 - (minY - pad) * this.vscale;
 
-      this.updateViewBox();
+      this._applyTransform();
       document.getElementById('zoom-level').textContent = Math.round(this.vscale * 100) + '%';
     },
 
-    centerOnNode(funcId) {
-      const node = this.nodeMap[funcId];
-      if (!node) return;
-      const container = document.getElementById('graph-container');
-      const W = container.clientWidth;
-      const H = container.clientHeight;
-      this.vx = W / 2 - node.x * this.vscale;
-      this.vy = H / 2 - node.y * this.vscale;
-      this.updateViewBox();
-    },
-
-    renderPositions() {
-      // Update node positions
-      this.nodes.forEach(node => {
-        if (!node.el) return;
-        node.rectEl.setAttribute('x', node.x - node.w / 2);
-        node.rectEl.setAttribute('y', node.y - node.h / 2);
-        node.textEl.setAttribute('x', node.x);
-        node.textEl.setAttribute('y', node.y);
-      });
-
-      // Update edge paths using dagre edge points
-      this.edges.forEach(edge => {
-        if (!edge.el) return;
-        if (edge.points && edge.points.length >= 2) {
-          const pts = edge.points;
-          // Shorten the last segment to stop at node border (for arrow marker)
-          const last = pts[pts.length - 1];
-          const prev = pts[pts.length - 2];
-          const b = edge.toNode;
-          const dx = last.x - prev.x, dy = last.y - prev.y;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const endX = last.x - (dx / dist) * (b.h / 2 + 4);
-          const endY = last.y - (dy / dist) * (b.h / 2 + 4);
-          let d = `M ${pts[0].x} ${pts[0].y}`;
-          for (let i = 1; i < pts.length - 1; i++) {
-            d += ` L ${pts[i].x} ${pts[i].y}`;
-          }
-          d += ` L ${endX} ${endY}`;
-          edge.el.setAttribute('d', d);
-        } else {
-          const a = edge.fromNode, b = edge.toNode;
-          edge.el.setAttribute('d', `M ${a.x} ${a.y} L ${b.x} ${b.y}`);
-        }
-      });
-    },
-
-    // ---- Node styling ----
-    getNodeFill(node, colorMode) {
-      if (node.isStdLib) return 'rgba(49,50,68,0.6)';
-      if (colorMode === 'complexity') {
-        if (node.complexity <= 3) return 'rgba(166,227,161,0.15)';
-        if (node.complexity <= 8) return 'rgba(249,226,175,0.15)';
-        return 'rgba(243,139,168,0.15)';
+    reset() {
+      // Remove all file boxes
+      for (const fb of Object.values(this.fileBoxes)) {
+        if (fb._resizeObserver) fb._resizeObserver.disconnect();
+        fb.el.remove();
       }
-      // By package
-      const color = this.pkgColors[node.pkg] || '#89b4fa';
-      return this.hexToRGBA(color, 0.12);
-    },
-
-    getNodeStroke(node) {
-      if (node.isStdLib) return '#3b3e52';
-      const color = this.pkgColors[node.pkg] || '#89b4fa';
-      return color;
-    },
-
-    hexToRGBA(hex, alpha) {
-      const r = parseInt(hex.slice(1, 3), 16);
-      const g = parseInt(hex.slice(3, 5), 16);
-      const b = parseInt(hex.slice(5, 7), 16);
-      return `rgba(${r},${g},${b},${alpha})`;
-    },
-
-    recolor() {
-      const colorMode = document.getElementById('color-mode').value;
-      this.nodes.forEach(node => {
-        if (node.rectEl) {
-          node.rectEl.setAttribute('fill', this.getNodeFill(node, colorMode));
-        }
-      });
-    },
-
-    // ---- Highlighting ----
-    async highlightNode(funcId) {
-      try {
-        const data = await App.api('/api/func?id=' + encodeURIComponent(funcId));
-        const callers = new Set(data.callers || []);
-        const callees = new Set(data.callees || []);
-
-        App.state.highlights = { callers: [...callers], current: funcId, callees: [...callees] };
-
-        // Highlight nodes
-        this.nodes.forEach(node => {
-          node.el.classList.remove('selected', 'caller', 'callee', 'dimmed');
-          if (node.id === funcId) {
-            node.el.classList.add('selected');
-          } else if (callers.has(node.id)) {
-            node.el.classList.add('caller');
-          } else if (callees.has(node.id)) {
-            node.el.classList.add('callee');
-          } else {
-            node.el.classList.add('dimmed');
-          }
-        });
-
-        // Highlight edges
-        this.edges.forEach(edge => {
-          edge.el.classList.remove('highlighted-caller', 'highlighted-callee', 'dimmed');
-          if (edge.to === funcId && callers.has(edge.from)) {
-            edge.el.classList.add('highlighted-caller');
-            edge.el.setAttribute('marker-end', 'url(#arrow-caller)');
-          } else if (edge.from === funcId && callees.has(edge.to)) {
-            edge.el.classList.add('highlighted-callee');
-            edge.el.setAttribute('marker-end', 'url(#arrow-callee)');
-          } else {
-            edge.el.classList.add('dimmed');
-            edge.el.setAttribute('marker-end', 'url(#arrow-default)');
-          }
-        });
-      } catch {
-        // Just select the node visually
-        this.nodes.forEach(node => {
-          node.el.classList.remove('selected', 'caller', 'callee', 'dimmed');
-          if (node.id === funcId) node.el.classList.add('selected');
-        });
-      }
+      this.fileBoxes = {};
+      // Remove arrows
+      this.svgOverlay.querySelectorAll('path.chain-arrow').forEach(p => p.remove());
+      this.arrowData = [];
+      this.activeChains.clear();
+      // Reset transform
+      this.vx = 0; this.vy = 0; this.vscale = 1;
+      this._applyTransform();
+      document.getElementById('zoom-level').textContent = '100%';
+      // Show hint
+      const hint = document.getElementById('chain-empty-hint');
+      if (hint) hint.style.display = '';
     },
 
     clearHighlights() {
       App.state.highlights = null;
-      this.nodes.forEach(node => {
-        node.el.classList.remove('selected', 'caller', 'callee', 'dimmed');
-      });
-      this.edges.forEach(edge => {
-        edge.el.classList.remove('highlighted-caller', 'highlighted-callee', 'dimmed');
-        edge.el.setAttribute('marker-end', 'url(#arrow-default)');
-      });
+      for (const fb of Object.values(this.fileBoxes)) {
+        for (const block of Object.values(fb.funcEls)) {
+          block.classList.remove('active-func', 'caller-func', 'callee-func', 'dimmed');
+        }
+      }
     },
   },
 
@@ -2024,32 +2164,13 @@ const App = {
     },
 
     async showChain() {
-      // Chain mode uses only func bookmarks
+      // Chain mode: activate each bookmarked function in the chain canvas
       const funcIds = Object.values(App.state.bookmarks).filter(b => b.type === 'func').map(b => b.funcId);
       if (funcIds.length < 2) { alert('Need at least 2 function bookmarks for chain mode'); return; }
-      try {
-        const muted = App.mute.getMutedIds().join(',');
-        const url = '/api/chain?nodes=' + encodeURIComponent(funcIds.join(',')) + (muted ? '&muted=' + encodeURIComponent(muted) : '');
-        const data = await App.api(url);
-        const chainIds = new Set(data.nodes.map(n => n.id));
-        const funcBmIds = new Set(funcIds);
-        App.graph.nodes.forEach(node => {
-          node.el.classList.remove('selected', 'caller', 'callee', 'dimmed');
-          if (chainIds.has(node.id)) {
-            node.el.classList.add(funcBmIds.has(node.id) ? 'selected' : 'callee');
-          } else {
-            node.el.classList.add('dimmed');
-          }
-        });
-        App.graph.edges.forEach(edge => {
-          edge.el.classList.remove('highlighted-caller', 'highlighted-callee', 'dimmed');
-          if (chainIds.has(edge.from) && chainIds.has(edge.to)) {
-            edge.el.classList.add('highlighted-callee');
-          } else {
-            edge.el.classList.add('dimmed');
-          }
-        });
-      } catch {}
+      App.chain.reset();
+      for (const fid of funcIds) {
+        await App.chain.activate(fid);
+      }
     },
   },
 
@@ -2078,7 +2199,7 @@ const App = {
         App.state.muted.push({ type: 'func', pattern: funcId });
         App.saveLocalState();
         this.renderList();
-        App.graph.reloadCurrent();
+        App.chain.reloadCurrent();
       }
     },
 
@@ -2089,7 +2210,7 @@ const App = {
         App.state.muted.push({ type: 'package', pattern: pkg });
         App.saveLocalState();
         this.renderList();
-        App.graph.reloadCurrent();
+        App.chain.reloadCurrent();
       }
     },
 
@@ -2111,7 +2232,7 @@ const App = {
           App.state.muted.splice(idx, 1);
           App.saveLocalState();
           this.renderList();
-          App.graph.reloadCurrent();
+          App.chain.reloadCurrent();
         });
         container.appendChild(item);
       });

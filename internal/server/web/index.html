@@ -40,19 +40,21 @@
       <div id="graph-toolbar">
         <button id="fit-btn" class="toolbar-btn" title="Fit to view">Fit</button>
         <span class="toolbar-sep"></span>
-        <label class="toolbar-label">Depth</label>
-        <input type="range" id="depth-slider" min="1" max="5" value="3" class="toolbar-slider">
-        <span id="depth-value" class="toolbar-value">3</span>
-        <span class="toolbar-sep"></span>
-        <select id="color-mode" class="toolbar-select">
-          <option value="package">Color by Package</option>
-          <option value="complexity">Color by Complexity</option>
-        </select>
+        <button id="chain-reset-btn" class="toolbar-btn" title="Clear canvas">Clear</button>
         <span class="toolbar-sep"></span>
         <span id="zoom-level" class="toolbar-value">100%</span>
       </div>
-      <div id="graph-container">
-        <svg id="graph-svg"></svg>
+      <div id="chain-container">
+        <svg id="chain-svg">
+          <defs>
+            <marker id="arrow-chain" viewBox="0 0 10 10" refX="10" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="#a6e3a1"/>
+            </marker>
+          </defs>
+        </svg>
+        <div id="chain-canvas"></div>
+        <div id="chain-empty-hint">Click a function to load its call chain</div>
       </div>
     </div>
 

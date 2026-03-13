@@ -157,7 +157,7 @@ body {
 .muted-item .mute-remove { cursor: pointer; color: var(--text-dim); font-size: 16px; }
 .muted-item .mute-remove:hover { color: var(--accent-red); }
 
-/* ---- Center Panel: Graph ---- */
+/* ---- Center Panel: Chain View ---- */
 #center-panel {
   display: flex;
   flex-direction: column;
@@ -190,83 +190,200 @@ body {
 .toolbar-label { font-size: 12px; color: var(--text-dim); }
 .toolbar-value { font-size: 12px; color: var(--text-secondary); min-width: 28px; }
 
-.toolbar-slider {
-  width: 80px;
-  accent-color: var(--accent-blue);
-}
-
-.toolbar-select {
-  padding: 3px 6px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  outline: none;
-}
-
-#graph-container {
+/* Chain container — canvas with pan/zoom */
+#chain-container {
   flex: 1;
   overflow: hidden;
   position: relative;
   cursor: grab;
+  background: var(--bg-primary);
 }
+#chain-container.grabbing { cursor: grabbing; }
 
-#graph-container.grabbing { cursor: grabbing; }
-
-#graph-svg {
+#chain-svg {
+  position: absolute;
+  top: 0; left: 0;
   width: 100%;
   height: 100%;
-  display: block;
-}
-
-/* Graph nodes */
-.graph-node { cursor: pointer; }
-.graph-node rect {
-  transition: stroke 0.2s, stroke-width 0.2s, filter 0.2s;
-  stroke-width: 1.5;
-}
-
-.graph-node:hover rect {
-  stroke-width: 2.5;
-  filter: drop-shadow(0 0 6px rgba(137,180,250,0.3));
-}
-
-.graph-node text {
   pointer-events: none;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  z-index: 2;
 }
 
-.graph-node.selected rect {
-  stroke: var(--highlight-current) !important;
-  stroke-width: 3;
-  filter: drop-shadow(0 0 10px rgba(250,179,135,0.4));
+#chain-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  transform-origin: 0 0;
+  z-index: 1;
 }
 
-.graph-node.caller rect {
-  stroke: var(--highlight-caller) !important;
-  stroke-width: 2.5;
+#chain-empty-hint {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text-dim);
+  font-size: 14px;
+  pointer-events: none;
+  z-index: 0;
 }
 
-.graph-node.callee rect {
-  stroke: var(--highlight-callee) !important;
-  stroke-width: 2.5;
+/* File boxes in chain view */
+.file-box {
+  position: absolute;
+  min-width: 280px;
+  min-height: 80px;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+  display: flex;
+  flex-direction: column;
 }
 
-.graph-node.dimmed { opacity: 0.15; }
-.graph-node.dimmed:hover { opacity: 0.5; }
+.file-box-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  z-index: 5;
+  background: linear-gradient(135deg, transparent 50%, var(--border) 50%);
+  border-radius: 0 0 8px 0;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+.file-box-resize:hover, .file-box-resize.active { opacity: 1; background: linear-gradient(135deg, transparent 50%, var(--accent-blue) 50%); }
 
-/* Graph edges */
-.graph-edge {
-  fill: none;
-  stroke: #3b3e52;
-  stroke-width: 1.5;
-  transition: stroke 0.2s, opacity 0.2s;
+.file-box-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  font-size: 12px;
+  color: var(--text-secondary);
+  user-select: none;
 }
 
-.graph-edge.highlighted-caller { stroke: var(--highlight-caller); stroke-width: 2; opacity: 1; }
-.graph-edge.highlighted-callee { stroke: var(--highlight-callee); stroke-width: 2; opacity: 1; }
-.graph-edge.dimmed { opacity: 0.06; }
+.file-box-header .file-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-box-header .file-close {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.file-box-header .file-close:hover { color: var(--accent-red); }
+
+.file-box-funcs {
+  padding: 4px 0;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Function blocks inside file boxes */
+.func-block-chain {
+  border-bottom: 1px solid var(--border);
+  transition: opacity 0.2s;
+}
+.func-block-chain:last-child { border-bottom: none; }
+.func-block-chain.dimmed { opacity: 0.25; }
+
+.func-header-chain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.func-header-chain:hover { background: rgba(255,255,255,0.03); }
+
+.func-header-chain .func-sig {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activate-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+}
+.activate-btn:hover { border-color: var(--accent-green); color: var(--accent-green); }
+
+.func-body-chain {
+  display: none;
+  padding: 0;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.func-block-chain.expanded .func-body-chain { display: block; }
+
+.func-body-resize {
+  height: 5px;
+  cursor: ns-resize;
+  background: transparent;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.func-body-resize:hover, .func-body-resize.active {
+  background: var(--accent-blue);
+}
+
+.func-body-chain .chain-code-line {
+  display: flex;
+  padding: 0 8px;
+  min-height: 17px;
+}
+.func-body-chain .chain-code-line:hover { background: rgba(255,255,255,0.03); }
+.func-body-chain .chain-line-num {
+  width: 32px;
+  text-align: right;
+  padding-right: 8px;
+  color: var(--text-dim);
+  user-select: none;
+  flex-shrink: 0;
+  font-size: 10px;
+}
+.func-body-chain .chain-line-code {
+  flex: 1;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* Role highlights for chain func blocks */
+.func-block-chain.active-func { background: rgba(250,179,135,0.1); border-left: 3px solid var(--highlight-current); }
+.func-block-chain.caller-func { background: rgba(137,180,250,0.08); border-left: 3px solid var(--highlight-caller); }
+.func-block-chain.callee-func { background: rgba(166,227,161,0.08); border-left: 3px solid var(--highlight-callee); }
 
 /* ---- Resize Handle ---- */
 #resize-handle {
