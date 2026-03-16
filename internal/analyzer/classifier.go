@@ -29,8 +29,16 @@ func ComputeComplexity(fn *ast.FuncDecl) int {
 	if fn.Body == nil {
 		return 1
 	}
+	return ComputeBlockComplexity(fn.Body)
+}
+
+// ComputeBlockComplexity calculates cyclomatic complexity of a block statement.
+func ComputeBlockComplexity(body *ast.BlockStmt) int {
+	if body == nil {
+		return 1
+	}
 	complexity := 1
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
+	ast.Inspect(body, func(n ast.Node) bool {
 		switch n.(type) {
 		case *ast.IfStmt:
 			complexity++
@@ -49,6 +57,18 @@ func ComputeComplexity(fn *ast.FuncDecl) int {
 		return true
 	})
 	return complexity
+}
+
+// ClassifyBlockStatements extracts and classifies statements from a block statement.
+func ClassifyBlockStatements(fset *token.FileSet, body *ast.BlockStmt, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
+	if body == nil {
+		return nil
+	}
+	var stmts []model.Statement
+	for _, s := range body.List {
+		stmts = append(stmts, classifyStmt(fset, s, info, src, logPkgs, logPrefixes)...)
+	}
+	return stmts
 }
 
 func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
@@ -98,6 +118,16 @@ func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []by
 
 	case *ast.ReturnStmt:
 		base.Category = model.CategoryReturn
+		// Check if return values contain a call expression
+		for _, res := range s.Results {
+			if call, ok := res.(*ast.CallExpr); ok {
+				if target := resolveCallTarget(call, info); target != nil {
+					base.CallTarget = target
+					base.Category = model.CategoryCall
+					break
+				}
+			}
+		}
 		return []model.Statement{base}
 
 	case *ast.IfStmt:
@@ -163,10 +193,20 @@ func resolveCallTarget(call *ast.CallExpr, info *types.Info) *model.CallTarget {
 			if pkg != nil {
 				pkgPath = pkg.Path()
 			}
-			recvType := sel.Recv().String()
+			// Extract bare receiver type name to match SSA FuncID format.
+			// sel.Recv() returns the full qualified type (e.g. *pkg/path.Type),
+			// but SSA uses just the type name (e.g. "Type").
+			recvType := sel.Recv()
+			if ptr, ok := recvType.(*types.Pointer); ok {
+				recvType = ptr.Elem()
+			}
+			typeName := recvType.String()
+			if named, ok := recvType.(*types.Named); ok {
+				typeName = named.Obj().Name()
+			}
 			funcName := obj.Name()
 			return &model.CallTarget{
-				FuncID:   fmt.Sprintf("%s.(%s).%s", pkgPath, recvType, funcName),
+				FuncID:   fmt.Sprintf("%s.(%s).%s", pkgPath, typeName, funcName),
 				Package:  pkgPath,
 				Function: funcName,
 				IsStdLib: isStdLib(pkgPath),

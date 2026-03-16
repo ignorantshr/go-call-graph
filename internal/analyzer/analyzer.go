@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/ignorantshr/go-call-graph/internal/config"
@@ -126,6 +127,12 @@ func Analyze(appCfg *config.Config) (*model.ProjectAnalysis, error) {
 				block := buildFuncBlock(fset, fn, pkg, src, logPkgs, logPrefixes)
 				fa.Functions = append(fa.Functions, block)
 				result.Functions[block.ID] = block
+
+				// Extract anonymous functions (FuncLit) from the function body
+				if fn.Body != nil {
+					parentID := block.ID
+					extractFuncLits(fset, fn.Body, parentID, pkg, src, logPkgs, logPrefixes, fa, result)
+				}
 			}
 
 			result.Files[filePath] = fa
@@ -175,6 +182,28 @@ func buildFuncBlock(fset *token.FileSet, fn *ast.FuncDecl, pkg *packages.Package
 
 	// Classify statements
 	block.Statements = ClassifyStatements(fset, fn, pkg.TypesInfo, src, logPkgs, logPrefixes)
+
+	// Inline anonymous function body statements into parent function,
+	// so call targets inside closures are visible at the parent level.
+	if fn.Body != nil {
+		var extraStmts []model.Statement
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			lit, ok := n.(*ast.FuncLit)
+			if !ok {
+				return true
+			}
+			if lit.Body != nil {
+				extraStmts = append(extraStmts, ClassifyBlockStatements(fset, lit.Body, pkg.TypesInfo, src, logPkgs, logPrefixes)...)
+			}
+			return false // don't recurse into nested FuncLits (handled by their own parent)
+		})
+		if len(extraStmts) > 0 {
+			block.Statements = append(block.Statements, extraStmts...)
+			sort.Slice(block.Statements, func(i, j int) bool {
+				return block.Statements[i].StartLine < block.Statements[j].StartLine
+			})
+		}
+	}
 
 	return block
 }
@@ -236,6 +265,75 @@ func enrichWithCallGraphPositions(result *model.ProjectAnalysis, positions map[s
 			}
 		}
 	}
+}
+
+// extractFuncLits walks a block statement looking for anonymous functions (*ast.FuncLit),
+// creates FuncBlocks for them with IDs matching SSA's parentFunc$N convention,
+// and recursively handles nested anonymous functions.
+func extractFuncLits(fset *token.FileSet, body *ast.BlockStmt, parentID string, pkg *packages.Package, src []byte, logPkgs map[string]bool, logPrefixes []string, fa *model.FileAnalysis, result *model.ProjectAnalysis) {
+	counter := 0
+	ast.Inspect(body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		counter++
+		litID := fmt.Sprintf("%s$%d", parentID, counter)
+
+		block := buildFuncLitBlock(fset, lit, pkg, src, litID, logPkgs, logPrefixes)
+		fa.Functions = append(fa.Functions, block)
+		result.Functions[block.ID] = block
+
+		// Recursively extract nested anonymous functions
+		if lit.Body != nil {
+			extractFuncLits(fset, lit.Body, litID, pkg, src, logPkgs, logPrefixes, fa, result)
+		}
+
+		return false // don't recurse into this FuncLit's children (handled above)
+	})
+}
+
+func buildFuncLitBlock(fset *token.FileSet, lit *ast.FuncLit, pkg *packages.Package, src []byte, funcID string, logPkgs map[string]bool, logPrefixes []string) *model.FuncBlock {
+	startPos := fset.Position(lit.Pos())
+	endPos := fset.Position(lit.End())
+
+	// Extract short name from funcID: e.g. "pkg/path.main$1" → "main$1"
+	name := funcID
+	if idx := strings.LastIndex(funcID, "."); idx != -1 {
+		name = funcID[idx+1:]
+	}
+
+	block := &model.FuncBlock{
+		ID:       funcID,
+		Name:     name,
+		FilePath: startPos.Filename,
+		StartLine: startPos.Line,
+		EndLine:   endPos.Line,
+	}
+
+	// Extract signature: from "func" keyword to opening brace
+	start := fset.Position(lit.Pos()).Offset
+	var end int
+	if lit.Body != nil {
+		end = fset.Position(lit.Body.Lbrace).Offset
+	} else {
+		end = fset.Position(lit.End()).Offset
+	}
+	if start >= 0 && end >= 0 && start < len(src) && end <= len(src) {
+		block.Signature = strings.TrimSpace(string(src[start:end]))
+	} else {
+		block.Signature = "func()"
+	}
+
+	// Classify statements in the body
+	if lit.Body != nil {
+		block.Statements = ClassifyBlockStatements(fset, lit.Body, pkg.TypesInfo, src, logPkgs, logPrefixes)
+	}
+
+	// Compute complexity
+	block.Complexity = ComputeBlockComplexity(lit.Body)
+
+	return block
 }
 
 func isProjectPackage(projectPkgs []string, pkgPath string) bool {

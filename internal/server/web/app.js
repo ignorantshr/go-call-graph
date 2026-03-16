@@ -415,9 +415,20 @@ const App = {
     },
 
     // ---- File box management ----
+    _pendingFileBoxes: {},  // filePath → Promise — dedup concurrent calls
+
     async _ensureFileBox(filePath) {
       if (this.fileBoxes[filePath]) return this.fileBoxes[filePath];
 
+      // If another call is already creating this file box, wait for it
+      if (this._pendingFileBoxes[filePath]) return this._pendingFileBoxes[filePath];
+
+      const p = this._createFileBox(filePath);
+      this._pendingFileBoxes[filePath] = p;
+      try { return await p; } finally { delete this._pendingFileBoxes[filePath]; }
+    },
+
+    async _createFileBox(filePath) {
       // Hide empty hint
       const hint = document.getElementById('chain-empty-hint');
       if (hint) hint.style.display = 'none';
@@ -958,6 +969,7 @@ const App = {
         fb.el.remove();
       }
       this.fileBoxes = {};
+      this._pendingFileBoxes = {};
       // Remove arrows
       this.svgOverlay.querySelectorAll('path.chain-arrow').forEach(p => p.remove());
       this.arrowData = [];
