@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/haoran-shi/go-call-graph/internal/analyzer"
-	"github.com/haoran-shi/go-call-graph/internal/config"
-	"github.com/haoran-shi/go-call-graph/internal/server"
+	"github.com/ignorantshr/go-call-graph/internal/analyzer"
+	"github.com/ignorantshr/go-call-graph/internal/config"
+	"github.com/ignorantshr/go-call-graph/internal/server"
 	"github.com/spf13/cobra"
 )
 

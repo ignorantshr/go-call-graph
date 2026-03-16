@@ -4,16 +4,23 @@ Interactive Go source code call graph analyzer. Parses a Go project via static a
 
 ## Features
 
-- **Hierarchical call graph** — dagre-based directed graph with pan, zoom, drag, node highlighting
-- **Code viewer** — syntax-highlighted source with call-link navigation
-- **Call chain highlighting** — click a node to see its callers (blue) and callees (green)
+- **Code Chain view** — click a function to load its call chain as floating file boxes with expandable code blocks and arrows connecting call sites to callees
+- **File boxes** — draggable, resizable containers showing file contents; dagre auto-layout with free repositioning
+- **Code viewer** — syntax-highlighted source with call-link navigation in the right panel
+- **Call chain arrows** — arrows originate from the exact call-site line and point to the callee's signature
 - **File-internal search** — find text within the current file, with match navigation
 - **Global text search** — search across all project files for code content
-- **Line bookmarks** — click any line number to add a labeled bookmark
+- **Line bookmarks** — double-click any line number to add a labeled bookmark
 - **Function bookmarks** — bookmark functions with chain mode (show paths between bookmarks)
-- **Mute system** — hide stdlib, specific packages, or functions from the graph
-- **Locate mode** — toggle to click code and focus the corresponding graph node
+- **Mute system** — hide stdlib, specific packages, or functions from the chain view
+- **Locate mode** — toggle to click code and focus the corresponding chain node
 - **Auto-folding** — long comments (>2 lines) are collapsed by default
+
+## Install
+
+```bash
+go install github.com/ignorantshr/go-call-graph/cmd/main.go@latest
+```
 
 ## Build
 
@@ -93,8 +100,8 @@ internal/
 2. Builds SSA representation and constructs a call graph via VTA (Variable Type Analysis)
 3. Classifies statements (calls, error checks, log, defer, etc.)
 4. Serves results through a JSON API
-5. Frontend renders an interactive hierarchical graph (dagre) with a code viewer panel
+5. Frontend renders a code-chain canvas with file boxes, expandable function blocks, and call-site arrows
 
 ## License
 
-MIT
+[MIT](LICENSE)

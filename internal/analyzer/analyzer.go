@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/haoran-shi/go-call-graph/internal/config"
-	"github.com/haoran-shi/go-call-graph/internal/model"
+	"github.com/ignorantshr/go-call-graph/internal/config"
+	"github.com/ignorantshr/go-call-graph/internal/model"
 	"golang.org/x/tools/go/packages"
 )
 

@@ -7,7 +7,7 @@ import (
 	"go/types"
 	"strings"
 
-	"github.com/haoran-shi/go-call-graph/internal/model"
+	"github.com/ignorantshr/go-call-graph/internal/model"
 )
 
 // ClassifyStatements extracts and classifies statements from a function body.

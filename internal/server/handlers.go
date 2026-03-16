@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/haoran-shi/go-call-graph/internal/analyzer"
-	"github.com/haoran-shi/go-call-graph/internal/model"
+	"github.com/ignorantshr/go-call-graph/internal/analyzer"
+	"github.com/ignorantshr/go-call-graph/internal/model"
 )
 
 // TreeNode represents a node in the file/package tree.

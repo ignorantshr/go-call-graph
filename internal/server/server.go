@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/haoran-shi/go-call-graph/internal/config"
-	"github.com/haoran-shi/go-call-graph/internal/model"
+	"github.com/ignorantshr/go-call-graph/internal/config"
+	"github.com/ignorantshr/go-call-graph/internal/model"
 )
 
 //go:embed all:web

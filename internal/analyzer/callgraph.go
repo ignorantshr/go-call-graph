@@ -5,7 +5,7 @@ import (
 	"go/types"
 	"strings"
 
-	"github.com/haoran-shi/go-call-graph/internal/model"
+	"github.com/ignorantshr/go-call-graph/internal/model"
 	"golang.org/x/tools/go/callgraph/vta"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"

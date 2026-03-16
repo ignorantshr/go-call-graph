@@ -1,4 +1,4 @@
-module github.com/haoran-shi/go-call-graph
+module github.com/ignorantshr/go-call-graph
 
 go 1.25.7
 
