@@ -11,7 +11,9 @@
       "Bash(jj status:*)",
       "Bash(jj diff:*)",
       "Bash(curl -s 'http://localhost:8080/api/func?id=github.com/ignorantshr/go-call-graph.main' 2>/dev/null | python3 -m json.tool 2>/dev/null | head -60)",
-      "Bash(jj log:*)"
+      "Bash(jj log:*)",
+      "Read(//private/tmp/gotest/**)",
+      "Bash(go list:*)"
     ]
   }
 }

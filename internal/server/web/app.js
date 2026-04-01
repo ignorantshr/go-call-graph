@@ -476,6 +476,7 @@ const App = {
 
       for (const fn of funcs) {
         if (App.mute.isMatch(fn.id)) continue;
+        if (fn.id.includes('$')) continue; // anonymous funcs are inlined into parent
         const block = document.createElement('div');
         block.className = 'func-block-chain';
         block.dataset.funcId = fn.id;
@@ -634,6 +635,10 @@ const App = {
     },
 
     _expandFunc(filePath, funcId, role) {
+      // Resolve anonymous function to parent (e.g. "pkg.main$1" → "pkg.main")
+      while (funcId.includes('$')) {
+        funcId = funcId.substring(0, funcId.lastIndexOf('$'));
+      }
       const fb = this.fileBoxes[filePath];
       if (!fb) return;
       const block = fb.funcEls[funcId];
@@ -783,8 +788,13 @@ const App = {
         const toFb = this.fileBoxes[arrow.toFilePath];
         if (!fromFb || !toFb) continue;
 
-        const fromBlock = fromFb.funcEls[arrow.fromFuncId];
-        const toBlock = toFb.funcEls[arrow.toFuncId];
+        // Resolve anonymous function IDs to parent for DOM lookup
+        let fromFuncId = arrow.fromFuncId;
+        while (fromFuncId.includes('$')) fromFuncId = fromFuncId.substring(0, fromFuncId.lastIndexOf('$'));
+        let toFuncId = arrow.toFuncId;
+        while (toFuncId.includes('$')) toFuncId = toFuncId.substring(0, toFuncId.lastIndexOf('$'));
+        const fromBlock = fromFb.funcEls[fromFuncId];
+        const toBlock = toFb.funcEls[toFuncId];
         if (!fromBlock || !toBlock) continue;
 
         // Source: specific call-site line, fallback to func header
@@ -803,25 +813,31 @@ const App = {
         const y1 = this._visibleYCenter(fromEl, fromFb.el) - containerRect.top;
         const y2 = this._visibleYCenter(toEl, toFb.el) - containerRect.top;
 
-        // Determine whether arrow goes left-to-right or right-to-left
         const fromBoxRect = fromFb.el.getBoundingClientRect();
         const toBoxRect = toFb.el.getBoundingClientRect();
-        const goRight = fromBoxRect.right <= toBoxRect.left + 20;
+        let d;
 
-        let x1, x2;
-        if (goRight) {
-          x1 = fromBoxRect.right - containerRect.left;
-          x2 = toBoxRect.left - containerRect.left;
+        if (fromFb === toFb) {
+          // Same file box: compact arc on the right side
+          const x = fromBoxRect.right - containerRect.left;
+          const bulge = 30 + Math.min(Math.abs(y2 - y1) * 0.3, 60);
+          d = `M ${x} ${y1} C ${x + bulge} ${y1}, ${x + bulge} ${y2}, ${x} ${y2}`;
         } else {
-          x1 = fromBoxRect.left - containerRect.left;
-          x2 = toBoxRect.right - containerRect.left;
+          // Cross file-box: determine left-to-right or right-to-left
+          const goRight = fromBoxRect.right <= toBoxRect.left + 20;
+          let x1, x2;
+          if (goRight) {
+            x1 = fromBoxRect.right - containerRect.left;
+            x2 = toBoxRect.left - containerRect.left;
+          } else {
+            x1 = fromBoxRect.left - containerRect.left;
+            x2 = toBoxRect.right - containerRect.left;
+          }
+          const dx = Math.max(Math.abs(x2 - x1) * 0.4, 30);
+          const cx1 = goRight ? x1 + dx : x1 - dx;
+          const cx2 = goRight ? x2 - dx : x2 + dx;
+          d = `M ${x1} ${y1} C ${cx1} ${y1}, ${cx2} ${y2}, ${x2} ${y2}`;
         }
-
-        // Bezier control points
-        const dx = Math.max(Math.abs(x2 - x1) * 0.4, 30);
-        const cx1 = goRight ? x1 + dx : x1 - dx;
-        const cx2 = goRight ? x2 - dx : x2 + dx;
-        const d = `M ${x1} ${y1} C ${cx1} ${y1}, ${cx2} ${y2}, ${x2} ${y2}`;
 
         const path = document.createElementNS(ns, 'path');
         path.setAttribute('class', 'chain-arrow');
@@ -865,8 +881,8 @@ const App = {
               await this._ensureFileBox(calleeFilePath);
               this._expandFunc(calleeFilePath, t.funcId, 'callee-func');
               allActiveFuncIds.push(t.funcId);
-              // Add arrow — fromLine = the call-site line
-              if (!this.arrowData.some(a => a.fromFuncId === funcId && a.toFuncId === t.funcId)) {
+              // Add arrow — fromLine = the call-site line; dedup by (file, line, target)
+              if (!this.arrowData.some(a => a.fromFilePath === filePath && a.fromLine === stmt.startLine && a.toFuncId === t.funcId)) {
                 this.arrowData.push({
                   fromFuncId: funcId, toFuncId: t.funcId,
                   fromFilePath: filePath, toFilePath: calleeFilePath,
@@ -887,20 +903,26 @@ const App = {
                 const callerData = await App.api('/api/func?id=' + encodeURIComponent(callerId));
                 if (!callerData.filePath) return;
                 await this._ensureFileBox(callerData.filePath);
-                this._expandFunc(callerData.filePath, callerId, 'caller-func');
-                allActiveFuncIds.push(callerId);
-                if (!this.arrowData.some(a => a.fromFuncId === callerId && a.toFuncId === funcId)) {
-                  // Find the call-site line in the caller's statements
-                  let callLine = null;
-                  if (callerData.statements) {
-                    for (const s of callerData.statements) {
-                      if (s.callTarget && s.callTarget.funcId === funcId && s.startLine) {
-                        callLine = s.startLine; break;
-                      }
+                // Resolve anonymous function to parent for display
+                let displayCallerId = callerId;
+                while (displayCallerId.includes('$')) {
+                  displayCallerId = displayCallerId.substring(0, displayCallerId.lastIndexOf('$'));
+                }
+                this._expandFunc(callerData.filePath, displayCallerId, 'caller-func');
+                allActiveFuncIds.push(displayCallerId);
+                // Find the call-site line in the caller's statements
+                let callLine = null;
+                if (callerData.statements) {
+                  for (const s of callerData.statements) {
+                    if (s.callTarget && s.callTarget.funcId === funcId && s.startLine) {
+                      callLine = s.startLine; break;
                     }
                   }
+                }
+                // Dedup by (file, line, target)
+                if (!this.arrowData.some(a => a.fromFilePath === callerData.filePath && a.fromLine === callLine && a.toFuncId === funcId)) {
                   this.arrowData.push({
-                    fromFuncId: callerId, toFuncId: funcId,
+                    fromFuncId: displayCallerId, toFuncId: funcId,
                     fromFilePath: callerData.filePath, toFilePath: filePath,
                     fromLine: callLine,
                   });
@@ -2026,12 +2048,14 @@ const App = {
           <div class="meta-row"><span class="meta-label">Exported</span><span class="meta-value">${data.isExported ? 'Yes' : 'No'}</span></div>
         `;
 
+        const shortId = (id) => id.includes('/') ? id.substring(id.lastIndexOf('/') + 1) : id;
+
         const callersList = document.getElementById('callers-list');
         callersList.innerHTML = '';
         (data.callers || []).forEach(id => {
           const li = document.createElement('li');
           const a = document.createElement('a');
-          a.textContent = id.split('.').pop();
+          a.textContent = shortId(id);
           a.title = id;
           a.addEventListener('click', () => App.selectFunc(id));
           li.appendChild(a);
@@ -2043,7 +2067,7 @@ const App = {
         (data.callees || []).forEach(id => {
           const li = document.createElement('li');
           const a = document.createElement('a');
-          a.textContent = id.split('.').pop();
+          a.textContent = shortId(id);
           a.title = id;
           a.addEventListener('click', () => App.selectFunc(id));
           li.appendChild(a);

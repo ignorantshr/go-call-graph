@@ -98,36 +98,37 @@ func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []by
 		return []model.Statement{base}
 
 	case *ast.AssignStmt:
-		// Check if RHS contains a call expression
+		// Collect all call expressions from RHS
+		var results []model.Statement
 		for _, rhs := range s.Rhs {
 			if call, ok := rhs.(*ast.CallExpr); ok {
 				classified := classifyCall(base, call, info, logPkgs, logPrefixes)
-				if classified.Category == model.CategoryLog {
-					return []model.Statement{classified}
-				}
-				// For non-log calls, keep as "call" but with assignment context
 				if classified.CallTarget != nil {
-					base.Category = model.CategoryCall
-					base.CallTarget = classified.CallTarget
-					return []model.Statement{base}
+					results = append(results, classified)
 				}
 			}
+		}
+		if len(results) > 0 {
+			return results
 		}
 		base.Category = model.CategoryAssign
 		return []model.Statement{base}
 
 	case *ast.ReturnStmt:
-		base.Category = model.CategoryReturn
-		// Check if return values contain a call expression
+		// Collect all call expressions from return values
+		var results []model.Statement
 		for _, res := range s.Results {
 			if call, ok := res.(*ast.CallExpr); ok {
-				if target := resolveCallTarget(call, info); target != nil {
-					base.CallTarget = target
-					base.Category = model.CategoryCall
-					break
+				classified := classifyCall(base, call, info, logPkgs, logPrefixes)
+				if classified.CallTarget != nil {
+					results = append(results, classified)
 				}
 			}
 		}
+		if len(results) > 0 {
+			return results
+		}
+		base.Category = model.CategoryReturn
 		return []model.Statement{base}
 
 	case *ast.IfStmt:

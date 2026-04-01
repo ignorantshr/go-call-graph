@@ -169,6 +169,17 @@ func (s *Server) handleFunc(w http.ResponseWriter, r *http.Request) {
 		resp.Callers = node.Callers
 		resp.Callees = node.Callees
 	}
+	// Merge callees from statement callTargets (includes inlined closure calls)
+	seen := make(map[string]bool, len(resp.Callees))
+	for _, c := range resp.Callees {
+		seen[c] = true
+	}
+	for _, stmt := range fn.Statements {
+		if stmt.CallTarget != nil && stmt.CallTarget.FuncID != "" && !seen[stmt.CallTarget.FuncID] {
+			resp.Callees = append(resp.Callees, stmt.CallTarget.FuncID)
+			seen[stmt.CallTarget.FuncID] = true
+		}
+	}
 	writeJSON(w, resp)
 }
 
