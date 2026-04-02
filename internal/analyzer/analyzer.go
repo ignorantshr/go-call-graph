@@ -254,13 +254,13 @@ func enrichWithCallGraphPositions(result *model.ProjectAnalysis, positions map[s
 					fn.Statements[i].CallTarget.FilePath = pos.Filename
 					fn.Statements[i].CallTarget.Line = pos.Line
 				}
-				// Determine if external (not in project packages)
-				if !isProjectPackage(result.Packages, stmt.CallTarget.Package) {
-					if stmt.CallTarget.IsStdLib {
-						// already marked
-					} else {
-						fn.Statements[i].CallTarget.IsExternal = true
-					}
+				// Determine stdlib/external based on project packages
+				if isProjectPackage(result.Packages, stmt.CallTarget.Package) {
+					// Project package — override any false positive from isStdLib heuristic
+					fn.Statements[i].CallTarget.IsStdLib = false
+					fn.Statements[i].CallTarget.IsExternal = false
+				} else if !stmt.CallTarget.IsStdLib {
+					fn.Statements[i].CallTarget.IsExternal = true
 				}
 			}
 		}

@@ -59,6 +59,21 @@ func ComputeBlockComplexity(body *ast.BlockStmt) int {
 	return complexity
 }
 
+func classifyBlock(body *ast.BlockStmt, fset *token.FileSet, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
+	if body == nil {
+		return nil
+	}
+	return classifyStmtList(body.List, fset, info, src, logPkgs, logPrefixes)
+}
+
+func classifyStmtList(stmts []ast.Stmt, fset *token.FileSet, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
+	var result []model.Statement
+	for _, s := range stmts {
+		result = append(result, classifyStmt(fset, s, info, src, logPkgs, logPrefixes)...)
+	}
+	return result
+}
+
 // ClassifyBlockStatements extracts and classifies statements from a block statement.
 func ClassifyBlockStatements(fset *token.FileSet, body *ast.BlockStmt, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
 	if body == nil {
@@ -134,15 +149,91 @@ func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []by
 	case *ast.IfStmt:
 		if isErrCheck(s) {
 			base.Category = model.CategoryErrorCheck
-			base.Foldable = true
-			return []model.Statement{base}
+		} else {
+			base.Category = model.CategoryControl
 		}
-		base.Category = model.CategoryControl
-		return []model.Statement{base}
+		base.Foldable = true
+		// Extract call from Init (e.g., if err := foo(); err != nil)
+		if s.Init != nil {
+			if assign, ok := s.Init.(*ast.AssignStmt); ok {
+				for _, rhs := range assign.Rhs {
+					if call, ok := rhs.(*ast.CallExpr); ok {
+						if t := resolveCallTarget(call, info); t != nil {
+							base.CallTarget = t
+							break
+						}
+					}
+				}
+			}
+		}
+		// If no callTarget from Init, try Cond (e.g., if !conf.IsValidProject(proj))
+		if base.CallTarget == nil && s.Cond != nil {
+			base.CallTarget = extractFirstCallTarget(s.Cond, info)
+		}
+		result := []model.Statement{base}
+		// Recurse into body and else
+		if s.Body != nil {
+			result = append(result, classifyBlock(s.Body, fset, info, src, logPkgs, logPrefixes)...)
+		}
+		if s.Else != nil {
+			result = append(result, classifyStmt(fset, s.Else, info, src, logPkgs, logPrefixes)...)
+		}
+		return result
 
-	case *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+	case *ast.ForStmt:
 		base.Category = model.CategoryControl
-		return []model.Statement{base}
+		if s.Cond != nil {
+			base.CallTarget = extractFirstCallTarget(s.Cond, info)
+		}
+		result := []model.Statement{base}
+		if s.Body != nil {
+			result = append(result, classifyBlock(s.Body, fset, info, src, logPkgs, logPrefixes)...)
+		}
+		return result
+
+	case *ast.RangeStmt:
+		base.Category = model.CategoryControl
+		if s.X != nil {
+			base.CallTarget = extractFirstCallTarget(s.X, info)
+		}
+		result := []model.Statement{base}
+		if s.Body != nil {
+			result = append(result, classifyBlock(s.Body, fset, info, src, logPkgs, logPrefixes)...)
+		}
+		return result
+
+	case *ast.SwitchStmt:
+		base.Category = model.CategoryControl
+		if s.Tag != nil {
+			base.CallTarget = extractFirstCallTarget(s.Tag, info)
+		}
+		result := []model.Statement{base}
+		if s.Body != nil {
+			result = append(result, classifyBlock(s.Body, fset, info, src, logPkgs, logPrefixes)...)
+		}
+		return result
+
+	case *ast.TypeSwitchStmt:
+		base.Category = model.CategoryControl
+		result := []model.Statement{base}
+		if s.Body != nil {
+			result = append(result, classifyBlock(s.Body, fset, info, src, logPkgs, logPrefixes)...)
+		}
+		return result
+
+	case *ast.SelectStmt:
+		base.Category = model.CategoryControl
+		result := []model.Statement{base}
+		if s.Body != nil {
+			result = append(result, classifyBlock(s.Body, fset, info, src, logPkgs, logPrefixes)...)
+		}
+		return result
+
+	case *ast.CaseClause:
+		return classifyStmtList(s.Body, fset, info, src, logPkgs, logPrefixes)
+
+	case *ast.CommClause:
+		return classifyStmtList(s.Body, fset, info, src, logPkgs, logPrefixes)
 
 	case *ast.GoStmt:
 		base.Category = model.CategoryCall
@@ -287,6 +378,26 @@ func isErrCheck(ifStmt *ast.IfStmt) bool {
 			(xIdent.Name == "nil" && yIdent.Name == "err")
 	}
 	return false
+}
+
+// extractFirstCallTarget walks an expression tree for the first resolvable call target.
+func extractFirstCallTarget(expr ast.Expr, info *types.Info) *model.CallTarget {
+	var target *model.CallTarget
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if target != nil {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if t := resolveCallTarget(call, info); t != nil {
+			target = t
+			return false
+		}
+		return true
+	})
+	return target
 }
 
 func isStdLib(pkgPath string) bool {

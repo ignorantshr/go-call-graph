@@ -326,6 +326,7 @@ const App = {
     fileBoxes: {},        // filePath → {el, x, y, fileData, _userPositioned, funcEls:{}}
     activeChains: new Set(),
     arrowData: [],        // [{fromFuncId, toFuncId, fromFilePath, toFilePath, fromLine?, el}]
+    _funcDataCache: {},   // funcId → API response (for depth=0 arrow sync)
     canvas: null,
     svgOverlay: null,
     container: null,
@@ -407,6 +408,11 @@ const App = {
         this._applyTransform();
         document.getElementById('zoom-level').textContent = Math.round(this.vscale * 100) + '%';
       }, { passive: false });
+
+      // Depth change → reload current chain
+      document.getElementById('chain-depth').addEventListener('change', () => {
+        this.reloadCurrent();
+      });
     },
 
     _applyTransform() {
@@ -457,6 +463,15 @@ const App = {
       header.appendChild(closeBtn);
       box.appendChild(header);
 
+      // Right-click on file header → mute package
+      header.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Use first function's ID to derive package for mute
+        const firstFn = fileData.functions && fileData.functions[0];
+        if (firstFn) App.showContextMenu(e, firstFn.id);
+      });
+
       // Drag via header
       header.addEventListener('mousedown', (e) => {
         if (e.target === closeBtn) return;
@@ -495,9 +510,20 @@ const App = {
         actBtn.title = 'Load call chain';
         actBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          App.selectFunc(fn.id);
+          if (this.activeChains.has(fn.id)) {
+            this.deactivate(fn.id);
+          } else {
+            App.selectFunc(fn.id);
+          }
         });
         hdr.appendChild(actBtn);
+
+        // Right-click context menu (mute / bookmark)
+        hdr.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          App.showContextMenu(e, fn.id);
+        });
         block.appendChild(hdr);
 
         // Collapsible body (code)
@@ -647,6 +673,9 @@ const App = {
       // Expand and render body
       block.classList.add('expanded');
       block.classList.remove('active-func', 'caller-func', 'callee-func', 'dimmed');
+      // Update toggle button
+      const btn = block.querySelector('.activate-btn');
+      if (btn) { btn.textContent = '\u2212'; btn.title = 'Remove from chain'; }
       block.classList.add(role);
 
       const body = block.querySelector('.func-body-chain');
@@ -854,104 +883,196 @@ const App = {
     // ---- Core: activate a function ----
     async activate(funcId) {
       this.activeChains.add(funcId);
+      const depthVal = parseInt(document.getElementById('chain-depth').value, 10);
+      const depth = Number.isNaN(depthVal) ? 1 : depthVal;
+      const visited = new Set();
+      const allActiveFuncIds = [];
+      const boxCountBefore = Object.keys(this.fileBoxes).length;
 
       try {
-        const data = await App.api('/api/func?id=' + encodeURIComponent(funcId));
-        const filePath = data.filePath;
-        if (!filePath) return;
+        await this._activateOne(funcId, depth, true, visited, allActiveFuncIds);
 
-        // Ensure file box for the activated function
-        await this._ensureFileBox(filePath);
-        this._expandFunc(filePath, funcId, 'active-func');
-
-        const allActiveFuncIds = [funcId];
-
-        // Process callees from statements
-        const calleePromises = [];
-        if (data.statements) {
-          for (const stmt of data.statements) {
-            if (!stmt.callTarget) continue;
-            const t = stmt.callTarget;
-            if (App.mute.isMatch(t.funcId)) continue;
-            if (t.isStdLib || t.isExternal) continue;
-            const calleeFilePath = t.filePath;
-            if (!calleeFilePath) continue;
-
-            calleePromises.push((async () => {
-              await this._ensureFileBox(calleeFilePath);
-              this._expandFunc(calleeFilePath, t.funcId, 'callee-func');
-              allActiveFuncIds.push(t.funcId);
-              // Add arrow — fromLine = the call-site line; dedup by (file, line, target)
-              if (!this.arrowData.some(a => a.fromFilePath === filePath && a.fromLine === stmt.startLine && a.toFuncId === t.funcId)) {
-                this.arrowData.push({
-                  fromFuncId: funcId, toFuncId: t.funcId,
-                  fromFilePath: filePath, toFilePath: calleeFilePath,
-                  fromLine: stmt.startLine,
-                });
-              }
-            })());
+        // Manual mode (depth=0): rebuild arrows between all active functions
+        if (depth === 0) {
+          this._syncActiveArrows();
+          for (const id of this.activeChains) {
+            if (!allActiveFuncIds.includes(id)) allActiveFuncIds.push(id);
           }
         }
-
-        // Process callers — need to fetch each for filePath
-        const callerPromises = [];
-        if (data.callers) {
-          for (const callerId of data.callers) {
-            if (App.mute.isMatch(callerId)) continue;
-            callerPromises.push((async () => {
-              try {
-                const callerData = await App.api('/api/func?id=' + encodeURIComponent(callerId));
-                if (!callerData.filePath) return;
-                await this._ensureFileBox(callerData.filePath);
-                // Resolve anonymous function to parent for display
-                let displayCallerId = callerId;
-                while (displayCallerId.includes('$')) {
-                  displayCallerId = displayCallerId.substring(0, displayCallerId.lastIndexOf('$'));
-                }
-                this._expandFunc(callerData.filePath, displayCallerId, 'caller-func');
-                allActiveFuncIds.push(displayCallerId);
-                // Find the call-site line in the caller's statements
-                let callLine = null;
-                if (callerData.statements) {
-                  for (const s of callerData.statements) {
-                    if (s.callTarget && s.callTarget.funcId === funcId && s.startLine) {
-                      callLine = s.startLine; break;
-                    }
-                  }
-                }
-                // Dedup by (file, line, target)
-                if (!this.arrowData.some(a => a.fromFilePath === callerData.filePath && a.fromLine === callLine && a.toFuncId === funcId)) {
-                  this.arrowData.push({
-                    fromFuncId: displayCallerId, toFuncId: funcId,
-                    fromFilePath: callerData.filePath, toFilePath: filePath,
-                    fromLine: callLine,
-                  });
-                }
-              } catch {}
-            })());
-          }
-        }
-
-        await Promise.all([...calleePromises, ...callerPromises]);
 
         this._collapseAllExcept(allActiveFuncIds);
         this._layoutFileBoxes();
-
-        // Need a frame for layout to settle before measuring for arrows
         await new Promise(r => requestAnimationFrame(r));
         this._updateArrows();
-        this.fitToView();
+        // Only auto-fit when new file boxes were added in auto mode (depth>0)
+        if (!this._skipFitToView && depth > 0 && Object.keys(this.fileBoxes).length > boxCountBefore) {
+          this.fitToView();
+        }
       } catch (e) {
         console.error('Chain activate error:', e);
       }
     },
 
+    deactivate(funcId) {
+      this.activeChains.delete(funcId);
+      delete this._funcDataCache[funcId];
+
+      // Remove arrows involving this function
+      this.arrowData = this.arrowData.filter(a => a.fromFuncId !== funcId && a.toFuncId !== funcId);
+
+      // Collapse the function block and restore '+' button
+      for (const fb of Object.values(this.fileBoxes)) {
+        let resolvedId = funcId;
+        while (resolvedId.includes('$')) resolvedId = resolvedId.substring(0, resolvedId.lastIndexOf('$'));
+        const block = fb.funcEls[resolvedId];
+        if (block) {
+          block.classList.remove('expanded', 'active-func', 'caller-func', 'callee-func');
+          block.classList.add('dimmed');
+          const body = block.querySelector('.func-body-chain');
+          if (body) body.innerHTML = '';
+          const btn = block.querySelector('.activate-btn');
+          if (btn) { btn.textContent = '+'; btn.title = 'Load call chain'; }
+        }
+      }
+
+      // Remove file boxes that have no active functions left
+      for (const [path, fb] of Object.entries(this.fileBoxes)) {
+        const hasActive = Object.entries(fb.funcEls).some(([fid, el]) =>
+          el.classList.contains('expanded')
+        );
+        if (!hasActive) this._removeFileBox(path);
+      }
+
+      this._updateArrows();
+    },
+
+    // Recursive core: expand one function and its callers/callees
+    // isRoot=true means this is the user-activated node (show callers); callees recurse with isRoot=false
+    async _activateOne(funcId, depth, isRoot, visited, allActiveFuncIds) {
+      if (visited.has(funcId)) return;
+      visited.add(funcId);
+
+      const data = await App.api('/api/func?id=' + encodeURIComponent(funcId));
+      this._funcDataCache[funcId] = data;
+      const filePath = data.filePath;
+      if (!filePath) return;
+
+      await this._ensureFileBox(filePath);
+      this._expandFunc(filePath, funcId, isRoot ? 'active-func' : 'callee-func');
+      allActiveFuncIds.push(funcId);
+
+      // Manual mode (depth=0): only expand self, arrows handled by _syncActiveArrows
+      if (depth <= 0) return;
+
+      // Process callees from statements
+      const calleeInfos = []; // collect for recursive expansion
+      if (data.statements) {
+        for (const stmt of data.statements) {
+          if (!stmt.callTarget) continue;
+          const t = stmt.callTarget;
+          if (App.mute.isMatch(t.funcId)) continue;
+          if (t.isStdLib || t.isExternal) continue;
+          if (!t.filePath) continue;
+
+          await this._ensureFileBox(t.filePath);
+          this._expandFunc(t.filePath, t.funcId, 'callee-func');
+          allActiveFuncIds.push(t.funcId);
+          // Add arrow
+          if (!this.arrowData.some(a => a.fromFilePath === filePath && a.fromLine === stmt.startLine && a.toFuncId === t.funcId)) {
+            this.arrowData.push({
+              fromFuncId: funcId, toFuncId: t.funcId,
+              fromFilePath: filePath, toFilePath: t.filePath,
+              fromLine: stmt.startLine,
+            });
+          }
+          if (depth > 1 && !visited.has(t.funcId)) {
+            calleeInfos.push(t.funcId);
+          }
+        }
+      }
+
+      // Process callers — only for the root node, don't recurse
+      if (isRoot && data.callers) {
+        const callerPromises = [];
+        for (const callerId of data.callers) {
+          if (App.mute.isMatch(callerId)) continue;
+          callerPromises.push((async () => {
+            try {
+              const callerData = await App.api('/api/func?id=' + encodeURIComponent(callerId));
+              if (!callerData.filePath) return;
+              await this._ensureFileBox(callerData.filePath);
+              let displayCallerId = callerId;
+              while (displayCallerId.includes('$')) {
+                displayCallerId = displayCallerId.substring(0, displayCallerId.lastIndexOf('$'));
+              }
+              this._expandFunc(callerData.filePath, displayCallerId, 'caller-func');
+              allActiveFuncIds.push(displayCallerId);
+              let callLine = null;
+              if (callerData.statements) {
+                for (const s of callerData.statements) {
+                  if (s.callTarget && s.callTarget.funcId === funcId && s.startLine) {
+                    callLine = s.startLine; break;
+                  }
+                }
+              }
+              if (!this.arrowData.some(a => a.fromFilePath === callerData.filePath && a.fromLine === callLine && a.toFuncId === funcId)) {
+                this.arrowData.push({
+                  fromFuncId: displayCallerId, toFuncId: funcId,
+                  fromFilePath: callerData.filePath, toFilePath: filePath,
+                  fromLine: callLine,
+                });
+              }
+            } catch {}
+          })());
+        }
+        await Promise.all(callerPromises);
+      }
+
+      // Recurse into callees
+      for (const calleeId of calleeInfos) {
+        await this._activateOne(calleeId, depth - 1, false, visited, allActiveFuncIds);
+      }
+    },
+
+    // Rebuild arrows between all active functions (for depth=0 manual mode)
+    _syncActiveArrows() {
+      this.arrowData = [];
+      for (const funcId of this.activeChains) {
+        const data = this._funcDataCache[funcId];
+        if (!data || !data.statements || !data.filePath) continue;
+        for (const stmt of data.statements) {
+          if (!stmt.callTarget || !stmt.callTarget.filePath) continue;
+          const t = stmt.callTarget;
+          // Only connect to other active, visible functions
+          let targetId = t.funcId;
+          while (targetId.includes('$')) targetId = targetId.substring(0, targetId.lastIndexOf('$'));
+          if (!this.activeChains.has(t.funcId) && !this.activeChains.has(targetId)) continue;
+          if (!this.arrowData.some(a => a.fromFilePath === data.filePath && a.fromLine === stmt.startLine && a.toFuncId === t.funcId)) {
+            this.arrowData.push({
+              fromFuncId: funcId, toFuncId: t.funcId,
+              fromFilePath: data.filePath, toFilePath: t.filePath,
+              fromLine: stmt.startLine,
+            });
+          }
+        }
+      }
+    },
+
     reloadCurrent() {
       if (this.activeChains.size === 0) return;
-      // Clear and re-activate all
       const funcs = [...this.activeChains];
+      // Preserve current view transform
+      const savedVx = this.vx, savedVy = this.vy, savedScale = this.vscale;
+      this._skipFitToView = true;
       this.reset();
-      funcs.forEach(fid => this.activate(fid));
+      const done = Promise.all(funcs.map(fid => this.activate(fid)));
+      done.then(() => {
+        this._skipFitToView = false;
+        // Restore view transform
+        this.vx = savedVx; this.vy = savedVy; this.vscale = savedScale;
+        this._applyTransform();
+        document.getElementById('zoom-level').textContent = Math.round(this.vscale * 100) + '%';
+      });
     },
 
     fitToView() {
@@ -996,6 +1117,7 @@ const App = {
       this.svgOverlay.querySelectorAll('path.chain-arrow').forEach(p => p.remove());
       this.arrowData = [];
       this.activeChains.clear();
+      this._funcDataCache = {};
       // Reset transform
       this.vx = 0; this.vy = 0; this.vscale = 1;
       this._applyTransform();
