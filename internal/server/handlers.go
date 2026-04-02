@@ -20,6 +20,10 @@ type TreeNode struct {
 	Children []*TreeNode `json:"children,omitempty"`
 }
 
+func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]string{"root": s.analysis.Root})
+}
+
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	root := &TreeNode{
 		Name: filepath.Base(s.analysis.Root),

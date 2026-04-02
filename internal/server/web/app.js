@@ -8,6 +8,7 @@ const App = {
     highlights: null,       // {callers:[], current:'', callees:[]}
     bookmarks: {},
     muted: [],
+    _views: {},
     bookmarkChainMode: false,
     cache: {},
     graphData: null,        // kept for API compat
@@ -21,7 +22,7 @@ const App = {
   },
 
   async init() {
-    this.loadLocalState();
+    await this.loadUserData();
     this.bindEvents();
     this.chain.init();
     await this.tree.load();
@@ -29,28 +30,19 @@ const App = {
     this.bookmarks.renderList();
   },
 
-  // ---- Persistence ----
-  loadLocalState() {
+  // ---- Persistence (server-side per-project storage) ----
+  _saveTimer: null,
+
+  async loadUserData() {
     try {
-      const bm = localStorage.getItem('gcg-bookmarks');
-      if (bm) {
-        const parsed = JSON.parse(bm);
-        // Migrate old format: { "pkg.Func": { note, addedAt } } → new format
-        const migrated = {};
-        let needsMigration = false;
-        for (const [key, val] of Object.entries(parsed)) {
-          if (val.type === 'line' || val.type === 'func') {
-            migrated[key] = val; // already new format
-          } else {
-            needsMigration = true;
-            migrated['func:' + key] = { type: 'func', funcId: key, label: val.note || '', addedAt: val.addedAt || new Date().toISOString() };
-          }
-        }
-        this.state.bookmarks = migrated;
-        if (needsMigration) this.saveLocalState();
+      const ud = await this.api('/api/userdata');
+      if (ud.bookmarks) this.state.bookmarks = ud.bookmarks;
+      if (ud.muted) this.state.muted = ud.muted;
+      if (ud.views) this.state._views = ud.views;
+      if (ud.outline) {
+        document.getElementById('code-outline').classList.remove('hidden');
       }
     } catch {}
-    try { const mt = localStorage.getItem('gcg-muted'); if (mt) this.state.muted = JSON.parse(mt); } catch {}
     if (this.state.muted.length === 0) {
       this.state.muted = [
         { type: 'stdlib', pattern: '*', builtin: true },
@@ -60,8 +52,20 @@ const App = {
   },
 
   saveLocalState() {
-    localStorage.setItem('gcg-bookmarks', JSON.stringify(this.state.bookmarks));
-    localStorage.setItem('gcg-muted', JSON.stringify(this.state.muted));
+    // Debounce: save to server after 500ms of inactivity
+    clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      fetch('/api/userdata/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookmarks: this.state.bookmarks,
+          muted: this.state.muted,
+          views: this.state._views || {},
+          outline: !document.getElementById('code-outline').classList.contains('hidden'),
+        }),
+      }).catch(() => {});
+    }, 500);
   },
 
   // ---- Events ----
@@ -194,24 +198,48 @@ const App = {
       const panel = document.getElementById('code-outline');
       btn.classList.toggle('active');
       panel.classList.toggle('hidden');
-      localStorage.setItem('gcg-outline', panel.classList.contains('hidden') ? '0' : '1');
+      this.saveLocalState();
       if (!panel.classList.contains('hidden')) {
         this.codeView.updateOutlineActive();
       }
     });
 
-    // Restore outline state from localStorage
-    if (localStorage.getItem('gcg-outline') === '1') {
+    // Restore outline state (already loaded via loadUserData)
+    if (!document.getElementById('code-outline').classList.contains('hidden')) {
       document.getElementById('outline-toggle').classList.add('active');
-      document.getElementById('code-outline').classList.remove('hidden');
     }
 
     // Set up scroll tracking for outline
     this.codeView.trackScrollForOutline();
 
+    // Panel toggles
+    document.getElementById('toggle-left').addEventListener('click', () => {
+      const app = document.getElementById('app');
+      app.classList.toggle('left-collapsed');
+      document.getElementById('toggle-left').textContent = app.classList.contains('left-collapsed') ? '▶' : '◀';
+    });
+    document.getElementById('toggle-right').addEventListener('click', () => {
+      const app = document.getElementById('app');
+      app.classList.toggle('right-collapsed');
+      document.getElementById('toggle-right').textContent = app.classList.contains('right-collapsed') ? '◀' : '▶';
+    });
+
     // Toolbar
     document.getElementById('fit-btn').addEventListener('click', () => this.chain.fitToView());
     document.getElementById('chain-reset-btn').addEventListener('click', () => this.chain.reset());
+    document.getElementById('chain-wrap-btn').addEventListener('click', (e) => {
+      e.target.classList.toggle('active');
+      document.querySelectorAll('.func-body-chain').forEach(el => el.classList.toggle('chain-wrap'));
+    });
+
+    // Canvas view save/load
+    document.getElementById('chain-save-btn').addEventListener('click', () => this.chain.saveView());
+    document.getElementById('chain-views-select').addEventListener('change', (e) => {
+      const name = e.target.value;
+      if (name) this.chain.loadView(name);
+      e.target.value = '';
+    });
+    this.chain._refreshViewsList();
 
     // Bookmark chain
     document.getElementById('bookmark-chain-btn').addEventListener('click', (e) => {
@@ -633,6 +661,12 @@ const App = {
           }
         }
       }
+
+      // Line elements map for fold operations
+      const lineEls = {}; // line → DOM element
+      let foldStart = null; // pending fold start line
+      let foldStartSpan = null;
+
       for (let line = fn.startLine; line <= fn.endLine; line++) {
         if (line < 1 || line > sourceLines.length) continue;
         const el = document.createElement('div');
@@ -644,8 +678,59 @@ const App = {
           const idx = codeHtml.indexOf(ct.escaped);
           if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
         }
-        el.innerHTML = `<span class="chain-line-num">${line}</span><span class="chain-line-code">${codeHtml}</span>`;
+        const numSpan = document.createElement('span');
+        numSpan.className = 'chain-line-num';
+        numSpan.textContent = line;
+        const codeSpan = document.createElement('span');
+        codeSpan.className = 'chain-line-code';
+        codeSpan.innerHTML = codeHtml;
+        el.appendChild(numSpan);
+        el.appendChild(codeSpan);
         body.appendChild(el);
+        lineEls[line] = el;
+
+        // Click line number to fold
+        ((ln, ns) => {
+          ns.style.cursor = 'pointer';
+          ns.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (foldStart === null) {
+              // First click: mark fold start
+              foldStart = ln;
+              foldStartSpan = ns;
+              ns.classList.add('chain-fold-start');
+            } else if (foldStart === ln) {
+              // Click same line: cancel
+              foldStart = null;
+              ns.classList.remove('chain-fold-start');
+              foldStartSpan = null;
+            } else {
+              // Second click: fold the range
+              const s = Math.min(foldStart, ln);
+              const ed = Math.max(foldStart, ln);
+              if (foldStartSpan) foldStartSpan.classList.remove('chain-fold-start');
+              foldStart = null;
+              foldStartSpan = null;
+              // Hide lines s+1..ed-1, add summary
+              const hidden = [];
+              for (let i = s + 1; i < ed; i++) {
+                if (lineEls[i]) { lineEls[i].style.display = 'none'; hidden.push(lineEls[i]); }
+              }
+              if (hidden.length === 0) return;
+              const summary = document.createElement('div');
+              summary.className = 'chain-code-line chain-fold-summary';
+              summary.innerHTML = `<span class="chain-line-num"></span><span class="chain-line-code chain-fold-label">▶ ${hidden.length} lines folded (${s + 1}‥${ed - 1})</span>`;
+              summary.style.cursor = 'pointer';
+              summary.addEventListener('click', () => {
+                hidden.forEach(h => h.style.display = '');
+                summary.remove();
+                this._updateArrows();
+              });
+              lineEls[s].after(summary);
+              this._updateArrows();
+            }
+          });
+        })(line, numSpan);
       }
 
       // Wire up call-links inside chain body
@@ -682,6 +767,10 @@ const App = {
       if (body && body.childElementCount === 0) {
         const fn = fb.fileData.functions.find(f => f.id === funcId);
         if (fn) this._renderFuncBody(body, fn, fb.fileData);
+      }
+      // Sync wrap state
+      if (body && document.getElementById('chain-wrap-btn').classList.contains('active')) {
+        body.classList.add('chain-wrap');
       }
     },
 
@@ -728,7 +817,7 @@ const App = {
       if (entries.length === 0) return;
 
       const g = new dagre.graphlib.Graph();
-      g.setGraph({ rankdir: 'LR', nodesep: 40, ranksep: 80, edgesep: 20 });
+      g.setGraph({ rankdir: 'LR', nodesep: 120, ranksep: 200, edgesep: 40 });
       g.setDefaultEdgeLabel(() => ({}));
 
       // Measure each file box
@@ -791,11 +880,25 @@ const App = {
       }
 
       // If element is fully clipped (scrolled out of view),
-      // snap to the nearest edge of the visible code area.
+      // snap to the nearest edge of the visible code area (intersection of body + funcs).
       if (top >= bottom) {
         const rawMid = (elRect.top + elRect.bottom) / 2;
-        const clipRect = (funcs || fileBoxEl).getBoundingClientRect();
-        return rawMid < clipRect.top ? clipRect.top : clipRect.bottom;
+        let clipTop = -Infinity, clipBottom = Infinity;
+        if (body) {
+          const br = body.getBoundingClientRect();
+          clipTop = Math.max(clipTop, br.top);
+          clipBottom = Math.min(clipBottom, br.bottom);
+        }
+        if (funcs) {
+          const fr = funcs.getBoundingClientRect();
+          clipTop = Math.max(clipTop, fr.top);
+          clipBottom = Math.min(clipBottom, fr.bottom);
+        }
+        if (!isFinite(clipTop)) {
+          const fbr = fileBoxEl.getBoundingClientRect();
+          clipTop = fbr.top; clipBottom = fbr.bottom;
+        }
+        return rawMid < clipTop ? clipTop : clipBottom;
       }
 
       return (top + bottom) / 2;
@@ -826,10 +929,20 @@ const App = {
         const toBlock = toFb.funcEls[toFuncId];
         if (!fromBlock || !toBlock) continue;
 
-        // Source: specific call-site line, fallback to func header
+        // Source: specific call-site line → fold summary → func header
         let fromEl = null;
         if (arrow.fromLine && fromBlock.classList.contains('expanded')) {
-          fromEl = fromBlock.querySelector(`.chain-code-line[data-line="${arrow.fromLine}"]`);
+          const candidate = fromBlock.querySelector(`.chain-code-line[data-line="${arrow.fromLine}"]`);
+          if (candidate && candidate.offsetHeight > 0) {
+            fromEl = candidate;
+          } else if (candidate) {
+            // Line is hidden by fold — find the nearest fold summary above it
+            let prev = candidate.previousElementSibling;
+            while (prev) {
+              if (prev.classList.contains('chain-fold-summary')) { fromEl = prev; break; }
+              prev = prev.previousElementSibling;
+            }
+          }
         }
         if (!fromEl) fromEl = fromBlock.querySelector('.func-header-chain');
         if (!fromEl) fromEl = fromBlock;
@@ -1134,6 +1247,88 @@ const App = {
           block.classList.remove('active-func', 'caller-func', 'callee-func', 'dimmed');
         }
       }
+    },
+
+    // ---- Canvas view save/load ----
+    _getViews() {
+      return App.state._views || {};
+    },
+    _setViews(views) {
+      App.state._views = views;
+      this._refreshViewsList();
+      App.saveLocalState();
+    },
+    _refreshViewsList() {
+      const sel = document.getElementById('chain-views-select');
+      const views = this._getViews();
+      sel.innerHTML = '<option value="">Views</option>';
+      for (const name of Object.keys(views).sort()) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      }
+      // Add delete option if views exist
+      if (Object.keys(views).length > 0) {
+        sel.appendChild(Object.assign(document.createElement('option'), {
+          value: '__delete__', textContent: '── Delete a view ──', disabled: false,
+          style: 'color: var(--text-dim); font-style: italic;'
+        }));
+      }
+    },
+    saveView() {
+      if (this.activeChains.size === 0) { alert('Nothing to save'); return; }
+      const name = prompt('View name:');
+      if (!name) return;
+      const positions = {};
+      for (const [fp, fb] of Object.entries(this.fileBoxes)) {
+        positions[fp] = { x: fb.x, y: fb.y };
+      }
+      const views = this._getViews();
+      views[name] = {
+        activeChains: [...this.activeChains],
+        depth: parseInt(document.getElementById('chain-depth').value, 10) || 0,
+        vx: this.vx, vy: this.vy, vscale: this.vscale,
+        positions,
+      };
+      this._setViews(views);
+    },
+    async loadView(name) {
+      if (name === '__delete__') {
+        const views = this._getViews();
+        const toDelete = prompt('Enter view name to delete:\n\n' + Object.keys(views).join(', '));
+        if (toDelete && views[toDelete]) {
+          delete views[toDelete];
+          this._setViews(views);
+        }
+        return;
+      }
+      const views = this._getViews();
+      const view = views[name];
+      if (!view) return;
+      document.getElementById('chain-depth').value = view.depth;
+      this.reset();
+      // Activate all saved functions
+      for (const fid of view.activeChains) {
+        await this.activate(fid);
+      }
+      // Restore file box positions
+      if (view.positions) {
+        for (const [fp, pos] of Object.entries(view.positions)) {
+          const fb = this.fileBoxes[fp];
+          if (fb) {
+            fb.x = pos.x; fb.y = pos.y;
+            fb._userPositioned = true;
+            fb.el.style.left = pos.x + 'px';
+            fb.el.style.top = pos.y + 'px';
+          }
+        }
+      }
+      // Restore canvas transform
+      this.vx = view.vx; this.vy = view.vy; this.vscale = view.vscale;
+      this._applyTransform();
+      document.getElementById('zoom-level').textContent = Math.round(this.vscale * 100) + '%';
+      this._updateArrows();
     },
   },
 
@@ -2324,7 +2519,7 @@ const App = {
     async showChain() {
       // Chain mode: activate each bookmarked function in the chain canvas
       const funcIds = Object.values(App.state.bookmarks).filter(b => b.type === 'func').map(b => b.funcId);
-      if (funcIds.length < 2) { alert('Need at least 2 function bookmarks for chain mode'); return; }
+      if (funcIds.length === 0) { alert('No function bookmarks yet'); return; }
       App.chain.reset();
       for (const fid of funcIds) {
         await App.chain.activate(fid);

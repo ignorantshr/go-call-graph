@@ -37,13 +37,22 @@
 
     <!-- Center Panel: Call Graph -->
     <div id="center-panel">
+      <button id="toggle-left" class="panel-toggle panel-toggle-left" title="Toggle left panel">◀</button>
+      <button id="toggle-right" class="panel-toggle panel-toggle-right" title="Toggle right panel">▶</button>
       <div id="graph-toolbar">
         <button id="fit-btn" class="toolbar-btn" title="Fit to view">Fit</button>
         <span class="toolbar-sep"></span>
         <button id="chain-reset-btn" class="toolbar-btn" title="Clear canvas">Clear</button>
         <span class="toolbar-sep"></span>
         <span class="toolbar-label">Depth</span>
-        <input id="chain-depth" type="number" min="0" max="10" value="1" class="toolbar-input" title="0 = manual mode, 1+ = auto expand depth">
+        <input id="chain-depth" type="number" min="0" max="10" value="0" class="toolbar-input" title="0 = manual mode, 1+ = auto expand depth">
+        <span class="toolbar-sep"></span>
+        <button id="chain-wrap-btn" class="toolbar-btn" title="Toggle word wrap in chain code blocks">Wrap</button>
+        <span class="toolbar-sep"></span>
+        <button id="chain-save-btn" class="toolbar-btn" title="Save current canvas view">Save</button>
+        <select id="chain-views-select" class="toolbar-select" title="Load saved view">
+          <option value="">Views</option>
+        </select>
         <span class="toolbar-sep"></span>
         <span id="zoom-level" class="toolbar-value">100%</span>
       </div>

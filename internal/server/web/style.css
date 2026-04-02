@@ -41,8 +41,31 @@ body {
   height: 100vh;
 }
 
+/* ---- Panel Toggle Buttons ---- */
+.panel-toggle {
+  position: absolute; z-index: 20; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 48px; padding: 0; border: 1px solid var(--border);
+  background: var(--bg-surface); color: var(--text-secondary); cursor: pointer;
+  font-size: 10px; display: flex; align-items: center; justify-content: center;
+}
+.panel-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+.panel-toggle-left { left: 0; border-radius: 0 4px 4px 0; border-left: none; }
+.panel-toggle-right { right: 0; border-radius: 4px 0 0 4px; border-right: none; }
+
+#app.left-collapsed { grid-template-columns: 0px 1fr 4px var(--right-panel-width, 400px); }
+#app.left-collapsed #left-panel { display: none; }
+#app.left-collapsed .panel-toggle-left { left: 0; }
+
+#app.right-collapsed { grid-template-columns: 240px 1fr 0px 0px; }
+#app.right-collapsed #right-panel { display: none; }
+#app.right-collapsed #resize-handle { display: none; }
+#app.right-collapsed .panel-toggle-right { right: 0; }
+
+#app.left-collapsed.right-collapsed { grid-template-columns: 0px 1fr 0px 0px; }
+
 /* ---- Left Panel ---- */
 #left-panel {
+  grid-column: 1;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
@@ -133,15 +156,15 @@ body {
 
 .bookmark-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   flex-wrap: wrap;
-  gap: 0;
+  gap: 2px;
 }
 .bookmark-item:hover { background: var(--bg-hover); }
-.bookmark-item .bm-name { color: var(--accent-yellow); flex: 1; min-width: 0; }
+.bookmark-item .bm-name { color: var(--text-primary); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bookmark-item .bm-line-name { color: var(--accent-teal); }
-.bookmark-item .bm-note { color: var(--text-dim); font-size: 11px; width: 100%; }
-.bookmark-item .bm-remove { cursor: pointer; color: var(--text-dim); font-size: 16px; flex-shrink: 0; padding: 0 4px; }
+.bookmark-item .bm-note { color: var(--text-secondary); font-size: 11px; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bookmark-item .bm-remove { cursor: pointer; color: var(--text-dim); font-size: 16px; flex-shrink: 0; padding: 0 4px; line-height: 1; }
 .bookmark-item .bm-remove:hover { color: var(--accent-red); }
 
 .muted-item {
@@ -159,10 +182,12 @@ body {
 
 /* ---- Center Panel: Chain View ---- */
 #center-panel {
+  grid-column: 2;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-primary);
+  position: relative;
 }
 
 #graph-toolbar {
@@ -190,6 +215,7 @@ body {
 .toolbar-label { font-size: 12px; color: var(--text-dim); }
 .toolbar-value { font-size: 12px; color: var(--text-secondary); min-width: 28px; }
 .toolbar-input { width: 40px; padding: 2px 4px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); font-size: 12px; text-align: center; }
+.toolbar-select { padding: 2px 4px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); font-size: 12px; max-width: 120px; }
 
 /* Chain container — canvas with pan/zoom */
 #chain-container {
@@ -380,6 +406,15 @@ body {
   white-space: pre;
   overflow-x: auto;
 }
+.chain-line-num.chain-fold-start { color: var(--accent-blue); background: rgba(137,180,250,0.15); }
+.chain-fold-summary { background: rgba(137,180,250,0.08); }
+.chain-fold-label { color: var(--accent-blue); cursor: pointer; font-style: italic; font-size: 11px; }
+.chain-fold-label:hover { color: var(--text-primary); }
+.func-body-chain.chain-wrap .chain-line-code {
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: visible;
+}
 
 /* Role highlights for chain func blocks */
 .func-block-chain.active-func { background: rgba(250,179,135,0.1); border-left: 3px solid var(--highlight-current); }
@@ -388,6 +423,7 @@ body {
 
 /* ---- Resize Handle ---- */
 #resize-handle {
+  grid-column: 3;
   width: 4px;
   cursor: col-resize;
   background: var(--border);
@@ -402,6 +438,7 @@ body {
 
 /* ---- Right Panel ---- */
 #right-panel {
+  grid-column: 4;
   background: var(--bg-secondary);
   display: flex;
   flex-direction: column;
