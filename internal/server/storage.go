@@ -15,6 +15,7 @@ type UserData struct {
 	Muted     json.RawMessage `json:"muted"`
 	Views     json.RawMessage `json:"views"`
 	Outline   bool            `json:"outline"`
+	FontSize  int             `json:"fontSize,omitempty"`
 }
 
 func storageDir() string {

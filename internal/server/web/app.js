@@ -42,6 +42,10 @@ const App = {
       if (ud.outline) {
         document.getElementById('code-outline').classList.remove('hidden');
       }
+      if (ud.fontSize) {
+        document.getElementById('font-size-input').value = ud.fontSize;
+        document.documentElement.style.setProperty('--code-font-size', ud.fontSize + 'px');
+      }
     } catch {}
     if (this.state.muted.length === 0) {
       this.state.muted = [
@@ -63,6 +67,7 @@ const App = {
           muted: this.state.muted,
           views: this.state._views || {},
           outline: !document.getElementById('code-outline').classList.contains('hidden'),
+          fontSize: parseInt(document.getElementById('font-size-input').value, 10) || 12,
         }),
       }).catch(() => {});
     }, 500);
@@ -230,6 +235,15 @@ const App = {
     document.getElementById('chain-wrap-btn').addEventListener('click', (e) => {
       e.target.classList.toggle('active');
       document.querySelectorAll('.func-body-chain').forEach(el => el.classList.toggle('chain-wrap'));
+    });
+
+    // Font size adjustment
+    document.getElementById('font-size-input').addEventListener('change', (e) => {
+      const val = Math.max(8, Math.min(20, parseInt(e.target.value, 10) || 12));
+      e.target.value = val;
+      document.documentElement.style.setProperty('--code-font-size', val + 'px');
+      this.chain._updateArrows();
+      this.saveLocalState();
     });
 
     // Canvas view save/load

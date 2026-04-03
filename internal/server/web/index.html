@@ -41,6 +41,7 @@
       <button id="toggle-right" class="panel-toggle panel-toggle-right" title="Toggle right panel">▶</button>
       <div id="graph-toolbar">
         <button id="fit-btn" class="toolbar-btn" title="Fit to view">Fit</button>
+        <span id="zoom-level" class="toolbar-value">100%</span>
         <span class="toolbar-sep"></span>
         <button id="chain-reset-btn" class="toolbar-btn" title="Clear canvas">Clear</button>
         <span class="toolbar-sep"></span>
@@ -54,7 +55,8 @@
           <option value="">Views</option>
         </select>
         <span class="toolbar-sep"></span>
-        <span id="zoom-level" class="toolbar-value">100%</span>
+        <span class="toolbar-label">Font</span>
+        <input id="font-size-input" type="number" min="8" max="20" value="12" class="toolbar-input" title="Code font size (px)">
       </div>
       <div id="chain-container">
         <svg id="chain-svg">

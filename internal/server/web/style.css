@@ -17,6 +17,7 @@
   --highlight-caller: #89b4fa;
   --highlight-current: #fab387;
   --highlight-callee: #a6e3a1;
+  --code-font-size: 12px;
   --code-keyword: #cba6f7;
   --code-string: #a6e3a1;
   --code-comment: #585b70;
@@ -256,6 +257,8 @@ body {
 /* File boxes in chain view */
 .file-box {
   position: absolute;
+  width: 640px;
+  height: 680px;
   min-width: 280px;
   min-height: 80px;
   background: var(--bg-secondary);
@@ -331,8 +334,8 @@ body {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
-  font-size: 11px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: var(--code-font-size);
   color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
@@ -367,8 +370,8 @@ body {
 .func-body-chain {
   display: none;
   padding: 0;
-  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
-  font-size: 11px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: var(--code-font-size);
   line-height: 1.5;
   max-height: 300px;
   overflow-y: auto;
@@ -574,8 +577,8 @@ body {
   overflow-y: auto;
   flex: 1;
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: var(--code-font-size);
+  line-height: 1.5;
 }
 
 #code-outline {
