@@ -85,16 +85,20 @@
       </div>
       <div class="rtab-content active" id="rtab-code">
         <div id="code-header">
-          <button id="nav-back" class="nav-btn" title="Back" disabled>&larr;</button>
-          <button id="nav-forward" class="nav-btn" title="Forward" disabled>&rarr;</button>
-          <span id="current-file-path">Click a node to view code</span>
-          <div id="code-search-bar">
-            <input type="text" id="code-search-input" placeholder="Find in file..." />
-            <span id="code-search-count"></span>
+          <div class="code-header-row">
+            <button id="nav-back" class="nav-btn" title="Back" disabled>&larr;</button>
+            <button id="nav-forward" class="nav-btn" title="Forward" disabled>&rarr;</button>
+            <span id="current-file-path">Click a node to view code</span>
           </div>
-          <button id="locate-toggle" class="toolbar-btn" title="Locate mode: click code to focus graph node">Locate</button>
-          <button id="wrap-toggle" class="toolbar-btn" title="Toggle word wrap">Wrap</button>
-          <button id="outline-toggle" class="toolbar-btn" title="Toggle outline">Outline</button>
+          <div class="code-header-row">
+            <div id="code-search-bar">
+              <input type="text" id="code-search-input" placeholder="Find in file..." />
+              <span id="code-search-count"></span>
+            </div>
+            <button id="locate-toggle" class="toolbar-btn" title="Locate mode">Locate</button>
+            <button id="wrap-toggle" class="toolbar-btn" title="Toggle word wrap">Wrap</button>
+            <button id="outline-toggle" class="toolbar-btn" title="Toggle outline">Outline</button>
+          </div>
         </div>
         <div id="code-body">
           <div id="code-view"></div>

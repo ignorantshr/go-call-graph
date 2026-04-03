@@ -259,8 +259,8 @@ body {
 /* File boxes in chain view */
 .file-box {
   position: absolute;
-  width: 640px;
-  height: 680px;
+  max-width: 640px;
+  max-height: 680px;
   min-width: 280px;
   min-height: 80px;
   background: var(--bg-secondary);
@@ -316,6 +316,12 @@ body {
 }
 .file-box-header .file-close:hover { color: var(--accent-red); }
 
+.file-box-outline {
+  padding: 1px 2px; background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: 3px; color: var(--text-secondary); font-size: 11px;
+  max-width: 32px; cursor: pointer; flex-shrink: 0;
+}
+
 .file-box-funcs {
   padding: 4px 0;
   flex: 1;
@@ -368,6 +374,13 @@ body {
   padding: 0;
 }
 .activate-btn:hover { border-color: var(--accent-green); color: var(--accent-green); }
+.view-btn {
+  width: 20px; height: 20px; border-radius: 4px; border: 1px solid var(--border);
+  background: none; color: var(--text-dim); font-size: 12px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; padding: 0;
+}
+.view-btn:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
 
 .func-body-chain {
   display: none;
@@ -476,14 +489,19 @@ body {
 
 #code-header {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   color: var(--text-dim);
   flex-shrink: 0;
+}
+.code-header-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .nav-btn {
@@ -513,11 +531,13 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex-shrink: 0;
+  flex: 1;
+  min-width: 0;
 }
 
 #code-search-input {
-  width: 140px;
+  flex: 1;
+  min-width: 80px;
   padding: 3px 8px;
   background: var(--bg-primary);
   border: 1px solid var(--border);

@@ -46,8 +46,7 @@ const App = {
         document.getElementById('font-size-input').value = ud.fontSize;
         document.documentElement.style.setProperty('--code-font-size', ud.fontSize + 'px');
       }
-      if (ud.theme && ud.theme !== 'dark') {
-        // Apply custom theme vars from server
+      if (ud.theme) {
         try {
           const vars = await fetch('/api/theme?name=' + encodeURIComponent(ud.theme)).then(r => r.json());
           for (const [key, val] of Object.entries(vars)) {
@@ -536,6 +535,29 @@ const App = {
       fname.textContent = filePath.split('/').slice(-2).join('/');
       fname.title = filePath;
       header.appendChild(fname);
+      // Outline dropdown
+      const outlineSel = document.createElement('select');
+      outlineSel.className = 'file-box-outline';
+      outlineSel.title = 'Functions in this file';
+      outlineSel.innerHTML = '<option value="">\u2630</option>';
+      const outlineFuncs = fileData.functions ? [...fileData.functions].sort((a, b) => a.startLine - b.startLine) : [];
+      for (const fn of outlineFuncs) {
+        if (fn.id.includes('$')) continue;
+        if (App.mute.isMatch(fn.id)) continue;
+        const opt = document.createElement('option');
+        opt.value = fn.id;
+        opt.textContent = fn.name;
+        opt.title = fn.signature || fn.id;
+        outlineSel.appendChild(opt);
+      }
+      outlineSel.addEventListener('mousedown', (e) => e.stopPropagation());
+      outlineSel.addEventListener('change', (e) => {
+        const fid = e.target.value;
+        if (fid) App.selectFunc(fid);
+        e.target.value = '';
+      });
+      header.appendChild(outlineSel);
+
       const closeBtn = document.createElement('span');
       closeBtn.className = 'file-close';
       closeBtn.textContent = '\u00d7';
@@ -579,6 +601,7 @@ const App = {
         const block = document.createElement('div');
         block.className = 'func-block-chain';
         block.dataset.funcId = fn.id;
+        block.style.display = 'none'; // hidden until expanded
 
         const hdr = document.createElement('div');
         hdr.className = 'func-header-chain';
@@ -590,15 +613,11 @@ const App = {
 
         const actBtn = document.createElement('button');
         actBtn.className = 'activate-btn';
-        actBtn.textContent = '+';
-        actBtn.title = 'Load call chain';
+        actBtn.textContent = '\u2212';
+        actBtn.title = 'Remove from chain';
         actBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (this.activeChains.has(fn.id)) {
-            this.deactivate(fn.id);
-          } else {
-            App.selectFunc(fn.id);
-          }
+          this.deactivate(fn.id);
         });
         hdr.appendChild(actBtn);
 
@@ -642,14 +661,28 @@ const App = {
         });
         block.appendChild(bodyResize);
 
-        // Click header to toggle expand
+        // View button — open in right sidebar
+        const viewBtn = document.createElement('button');
+        viewBtn.className = 'view-btn';
+        viewBtn.textContent = '\u21e8';
+        viewBtn.title = 'View in sidebar';
+        viewBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          App.showFuncCode(fn.id);
+          App.infoPanel.show(fn.id);
+        });
+        hdr.appendChild(viewBtn);
+
+        // Click header to toggle code body
         hdr.addEventListener('click', (e) => {
-          if (e.target === actBtn) return;
+          if (e.target === actBtn || e.target === viewBtn) return;
           block.classList.toggle('expanded');
           if (block.classList.contains('expanded') && body.childElementCount === 0) {
             this._renderFuncBody(body, fn, fileData);
+            if (document.getElementById('chain-wrap-btn').classList.contains('active')) {
+              body.classList.add('chain-wrap');
+            }
           }
-          // Re-layout arrows after expand/collapse
           requestAnimationFrame(() => this._updateArrows());
         });
 
@@ -811,12 +844,10 @@ const App = {
       const block = fb.funcEls[funcId];
       if (!block) return;
 
-      // Expand and render body
+      // Show and expand
+      block.style.display = '';
       block.classList.add('expanded');
       block.classList.remove('active-func', 'caller-func', 'callee-func', 'dimmed');
-      // Update toggle button
-      const btn = block.querySelector('.activate-btn');
-      if (btn) { btn.textContent = '\u2212'; btn.title = 'Remove from chain'; }
       block.classList.add(role);
 
       const body = block.querySelector('.func-body-chain');
@@ -830,15 +861,8 @@ const App = {
       }
     },
 
-    _collapseAllExcept(activeFuncIds) {
-      const activeSet = new Set(activeFuncIds);
-      for (const fb of Object.values(this.fileBoxes)) {
-        for (const [fid, block] of Object.entries(fb.funcEls)) {
-          if (!activeSet.has(fid)) {
-            block.classList.add('dimmed');
-          }
-        }
-      }
+    _collapseAllExcept() {
+      // No-op: non-expanded blocks are already hidden
     },
 
     _removeFileBox(filePath) {
@@ -872,40 +896,41 @@ const App = {
       const entries = Object.entries(this.fileBoxes);
       if (entries.length === 0) return;
 
-      const g = new dagre.graphlib.Graph();
-      g.setGraph({ rankdir: 'LR', nodesep: 120, ranksep: 200, edgesep: 40 });
-      g.setDefaultEdgeLabel(() => ({}));
-
-      // Measure each file box
+      // Collect occupied rectangles from already-positioned boxes
+      const occupied = [];
+      const needLayout = [];
       for (const [fp, fb] of entries) {
+        if (fb._userPositioned || fb._autoPositioned) {
+          occupied.push({ x: fb.x, y: fb.y, w: fb.el.offsetWidth || 300, h: fb.el.offsetHeight || 100 });
+        } else {
+          needLayout.push([fp, fb]);
+        }
+      }
+
+      if (needLayout.length === 0) return;
+
+      const gap = 40;
+      for (const [fp, fb] of needLayout) {
         const w = fb.el.offsetWidth || 300;
         const h = fb.el.offsetHeight || 100;
-        g.setNode(fp, { width: w, height: h });
-      }
 
-      // Add cross-file edges
-      const addedEdges = new Set();
-      for (const arrow of this.arrowData) {
-        if (arrow.fromFilePath !== arrow.toFilePath) {
-          const key = arrow.fromFilePath + '->' + arrow.toFilePath;
-          if (!addedEdges.has(key)) {
-            addedEdges.add(key);
-            g.setEdge(arrow.fromFilePath, arrow.toFilePath);
+        // Find position to the right of all occupied boxes
+        let x = 0, y = 0;
+        if (occupied.length > 0) {
+          // Place to the right of the rightmost box
+          let maxRight = -Infinity, refY = 0;
+          for (const r of occupied) {
+            if (r.x + r.w > maxRight) { maxRight = r.x + r.w; refY = r.y; }
           }
+          x = maxRight + gap;
+          y = refY;
         }
-      }
 
-      dagre.layout(g);
-
-      for (const [fp, fb] of entries) {
-        if (fb._userPositioned) continue;
-        const ln = g.node(fp);
-        if (ln) {
-          fb.x = ln.x - (fb.el.offsetWidth || 300) / 2;
-          fb.y = ln.y - (fb.el.offsetHeight || 100) / 2;
-          fb.el.style.left = fb.x + 'px';
-          fb.el.style.top = fb.y + 'px';
-        }
+        fb.x = x; fb.y = y;
+        fb.el.style.left = x + 'px';
+        fb.el.style.top = y + 'px';
+        fb._autoPositioned = true;
+        occupied.push({ x, y, w, h });
       }
     },
 
@@ -1021,20 +1046,34 @@ const App = {
           const bulge = 30 + Math.min(Math.abs(y2 - y1) * 0.3, 60);
           d = `M ${x} ${y1} C ${x + bulge} ${y1}, ${x + bulge} ${y2}, ${x} ${y2}`;
         } else {
-          // Cross file-box: determine left-to-right or right-to-left
-          const goRight = fromBoxRect.right <= toBoxRect.left + 20;
-          let x1, x2;
-          if (goRight) {
-            x1 = fromBoxRect.right - containerRect.left;
-            x2 = toBoxRect.left - containerRect.left;
+          // Pick the pair of edges with minimum distance
+          const fL = fromBoxRect.left - containerRect.left;
+          const fR = fromBoxRect.right - containerRect.left;
+          const tL = toBoxRect.left - containerRect.left;
+          const tR = toBoxRect.right - containerRect.left;
+          const pairs = [
+            { x1: fR, x2: tL }, // right → left
+            { x1: fL, x2: tR }, // left → right
+            { x1: fR, x2: tR }, // right → right
+            { x1: fL, x2: tL }, // left → left
+          ];
+          const best = pairs.reduce((a, b) => Math.abs(a.x1 - a.x2) <= Math.abs(b.x1 - b.x2) ? a : b);
+          const x1 = best.x1, x2 = best.x2;
+          const sameEdge = (x1 === fR && x2 === tR) || (x1 === fL && x2 === tL);
+
+          if (sameEdge) {
+            // Both on same side: arc outward
+            const bulge = 30 + Math.min(Math.abs(y2 - y1) * 0.3, 60);
+            const dir = x1 === fR ? 1 : -1;
+            d = `M ${x1} ${y1} C ${x1 + bulge * dir} ${y1}, ${x2 + bulge * dir} ${y2}, ${x2} ${y2}`;
           } else {
-            x1 = fromBoxRect.left - containerRect.left;
-            x2 = toBoxRect.right - containerRect.left;
+            // Opposite sides: curve between them
+            const dx = Math.max(Math.abs(x2 - x1) * 0.4, 30);
+            const goRight = x1 < x2;
+            const cx1 = goRight ? x1 + dx : x1 - dx;
+            const cx2 = goRight ? x2 - dx : x2 + dx;
+            d = `M ${x1} ${y1} C ${cx1} ${y1}, ${cx2} ${y2}, ${x2} ${y2}`;
           }
-          const dx = Math.max(Math.abs(x2 - x1) * 0.4, 30);
-          const cx1 = goRight ? x1 + dx : x1 - dx;
-          const cx2 = goRight ? x2 - dx : x2 + dx;
-          d = `M ${x1} ${y1} C ${cx1} ${y1}, ${cx2} ${y2}, ${x2} ${y2}`;
         }
 
         const path = document.createElementNS(ns, 'path');
@@ -1089,18 +1128,16 @@ const App = {
       // Remove arrows involving this function
       this.arrowData = this.arrowData.filter(a => a.fromFuncId !== funcId && a.toFuncId !== funcId);
 
-      // Collapse the function block and restore '+' button
+      // Hide the function block
       for (const fb of Object.values(this.fileBoxes)) {
         let resolvedId = funcId;
         while (resolvedId.includes('$')) resolvedId = resolvedId.substring(0, resolvedId.lastIndexOf('$'));
         const block = fb.funcEls[resolvedId];
         if (block) {
           block.classList.remove('expanded', 'active-func', 'caller-func', 'callee-func');
-          block.classList.add('dimmed');
+          block.style.display = 'none';
           const body = block.querySelector('.func-body-chain');
           if (body) body.innerHTML = '';
-          const btn = block.querySelector('.activate-btn');
-          if (btn) { btn.textContent = '+'; btn.title = 'Load call chain'; }
         }
       }
 
@@ -1319,17 +1356,15 @@ const App = {
       const views = this._getViews();
       sel.innerHTML = '<option value="">Views</option>';
       for (const name of Object.keys(views).sort()) {
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.textContent = name;
-        sel.appendChild(opt);
-      }
-      // Add delete option if views exist
-      if (Object.keys(views).length > 0) {
-        sel.appendChild(Object.assign(document.createElement('option'), {
-          value: '__delete__', textContent: '── Delete a view ──', disabled: false,
-          style: 'color: var(--text-dim); font-style: italic;'
-        }));
+        const loadOpt = document.createElement('option');
+        loadOpt.value = name;
+        loadOpt.textContent = name;
+        sel.appendChild(loadOpt);
+        const delOpt = document.createElement('option');
+        delOpt.value = '__del__' + name;
+        delOpt.textContent = '  \u00d7 delete "' + name + '"';
+        delOpt.style.color = 'var(--text-dim)';
+        sel.appendChild(delOpt);
       }
     },
     saveView() {
@@ -1350,11 +1385,11 @@ const App = {
       this._setViews(views);
     },
     async loadView(name) {
-      if (name === '__delete__') {
+      if (name.startsWith('__del__')) {
+        const viewName = name.substring(7);
         const views = this._getViews();
-        const toDelete = prompt('Enter view name to delete:\n\n' + Object.keys(views).join(', '));
-        if (toDelete && views[toDelete]) {
-          delete views[toDelete];
+        if (views[viewName]) {
+          delete views[viewName];
           this._setViews(views);
         }
         return;
@@ -2448,6 +2483,11 @@ const App = {
         });
       } catch {
         document.getElementById('info-func-name').textContent = funcId;
+        document.getElementById('info-signature').innerHTML = '';
+        document.getElementById('info-doc').style.display = 'none';
+        document.getElementById('info-meta').innerHTML = '';
+        document.getElementById('callers-list').innerHTML = '';
+        document.getElementById('callees-list').innerHTML = '';
       }
     },
   },
