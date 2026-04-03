@@ -231,6 +231,10 @@ func ssaFuncID(fn *ssa.Function) string {
 	pkg := fn.Pkg.Pkg
 	pkgPath := pkg.Path()
 
+	// Strip type parameters from the function name (e.g. "Foo[int]" → "Foo")
+	// so that SSA generic instantiation IDs match AST-derived IDs.
+	name := stripTypeParams(fn.Name())
+
 	// For methods, include the receiver type
 	sig := fn.Signature
 	recv := sig.Recv()
@@ -242,11 +246,20 @@ func ssaFuncID(fn *ssa.Function) string {
 		}
 		named, ok := recvType.(*types.Named)
 		if ok {
-			return pkgPath + ".(" + named.Obj().Name() + ")." + fn.Name()
+			return pkgPath + ".(" + stripTypeParams(named.Obj().Name()) + ")." + name
 		}
 	}
 
-	return pkgPath + "." + fn.Name()
+	return pkgPath + "." + name
+}
+
+// stripTypeParams removes type parameter brackets from a name.
+// e.g. "Foo[int, string]" → "Foo", "Bar" → "Bar"
+func stripTypeParams(name string) string {
+	if idx := strings.Index(name, "["); idx != -1 {
+		return name[:idx]
+	}
+	return name
 }
 
 func getOrCreateNode(cg *model.CallGraphData, funcID string) *model.CallGraphNode {

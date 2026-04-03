@@ -261,8 +261,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	var results []SearchResult
 
+	// Sort function IDs for deterministic results
+	funcIDs := make([]string, 0, len(s.analysis.Functions))
+	for id := range s.analysis.Functions {
+		funcIDs = append(funcIDs, id)
+	}
+	sort.Strings(funcIDs)
+
 	// Search functions
-	for _, fn := range s.analysis.Functions {
+	for _, id := range funcIDs {
+		fn := s.analysis.Functions[id]
 		if strings.Contains(strings.ToLower(fn.Name), q) ||
 			strings.Contains(strings.ToLower(fn.ID), q) {
 			results = append(results, SearchResult{
@@ -276,8 +284,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Sort file paths for deterministic results
+	filePaths := make([]string, 0, len(s.analysis.Files))
+	for path := range s.analysis.Files {
+		filePaths = append(filePaths, path)
+	}
+	sort.Strings(filePaths)
+
 	// Search files
-	for path, fa := range s.analysis.Files {
+	for _, path := range filePaths {
+		fa := s.analysis.Files[path]
 		if strings.Contains(strings.ToLower(filepath.Base(path)), q) {
 			results = append(results, SearchResult{
 				Type:     "file",
@@ -292,7 +308,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Search file contents (full text)
 	const maxTextResults = 30
 	textCount := 0
-	for path := range s.analysis.Files {
+	for _, path := range filePaths {
 		if textCount >= maxTextResults {
 			break
 		}

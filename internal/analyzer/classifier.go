@@ -242,6 +242,14 @@ func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []by
 		}
 		return []model.Statement{base}
 
+	case *ast.SendStmt:
+		// ch <- foo(): extract call target from the value expression
+		if call, ok := s.Value.(*ast.CallExpr); ok {
+			classified := classifyCall(base, call, info, logPkgs, logPrefixes)
+			return []model.Statement{classified}
+		}
+		return []model.Statement{base}
+
 	case *ast.BlockStmt:
 		var result []model.Statement
 		for _, inner := range s.List {

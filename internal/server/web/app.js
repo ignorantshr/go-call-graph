@@ -348,12 +348,24 @@ const App = {
   },
 
   // ---- API ----
+  _cacheKeys: [],   // LRU order for cache eviction
+  _cacheMax: 200,   // max cached endpoints
+
   async api(endpoint) {
     if (this.state.cache[endpoint]) return this.state.cache[endpoint];
     const resp = await fetch(endpoint);
     if (!resp.ok) throw new Error(`API error: ${resp.status}`);
     const data = await resp.json();
-    this.state.cache[endpoint] = data;
+    // Don't cache search results (they vary by query and are cheap to re-fetch)
+    if (!endpoint.startsWith('/api/search')) {
+      this.state.cache[endpoint] = data;
+      this._cacheKeys.push(endpoint);
+      // Evict oldest entries when cache exceeds limit
+      while (this._cacheKeys.length > this._cacheMax) {
+        const oldest = this._cacheKeys.shift();
+        delete this.state.cache[oldest];
+      }
+    }
     return data;
   },
 
@@ -735,7 +747,7 @@ const App = {
 
     _renderFuncBody(body, fn, fileData) {
       const sourceLines = fileData.source.split('\n');
-      // Build call-target map for this function
+      // Build call-target map for this function: lineNum -> [{cls, escaped, linkHtml}]
       const callTargets = {};
       if (fn.statements) {
         for (const stmt of fn.statements) {
@@ -743,10 +755,11 @@ const App = {
             const t = stmt.callTarget;
             const cls = t.isStdLib ? 'call-link stdlib' : (t.isExternal ? 'call-link external' : 'call-link');
             const escaped = App.codeView.esc(t.function);
-            callTargets[stmt.startLine] = {
+            if (!callTargets[stmt.startLine]) callTargets[stmt.startLine] = [];
+            callTargets[stmt.startLine].push({
               cls, escaped,
               linkHtml: `<span class="${cls}" data-func-id="${App.codeView.esc(t.funcId)}" title="${App.codeView.esc(t.funcId)}">${escaped}</span>`,
-            };
+            });
           }
         }
       }
@@ -762,10 +775,12 @@ const App = {
         el.className = 'chain-code-line';
         el.dataset.line = line;
         let codeHtml = App.codeView.highlightSyntax(App.codeView.esc(sourceLines[line - 1]));
-        const ct = callTargets[line];
-        if (ct) {
-          const idx = codeHtml.indexOf(ct.escaped);
-          if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+        const cts = callTargets[line];
+        if (cts) {
+          for (const ct of cts) {
+            const idx = codeHtml.indexOf(ct.escaped);
+            if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+          }
         }
         const numSpan = document.createElement('span');
         numSpan.className = 'chain-line-num';
@@ -881,7 +896,11 @@ const App = {
       });
       // Remove active chains for funcs in this file
       for (const fid of [...this.activeChains]) {
-        // Remove if belongs to this file (check in arrowData not needed, just cleanup)
+        const data = this._funcDataCache[fid];
+        if (data && data.filePath === filePath) {
+          this.activeChains.delete(fid);
+          delete this._funcDataCache[fid];
+        }
       }
       this._updateArrows();
       // Show hint if canvas empty
@@ -1682,7 +1701,7 @@ const App = {
       const filePath = file.path || '';
       const folds = App.folds.get(filePath);
 
-      // Build call-target map: lineNum -> {cls, escaped, linkHtml}
+      // Build call-target map: lineNum -> [{cls, escaped, linkHtml}]
       const callTargets = {};
       if (file.functions) {
         for (const fn of file.functions) {
@@ -1692,10 +1711,11 @@ const App = {
               const t = stmt.callTarget;
               const cls = t.isStdLib ? 'call-link stdlib' : (t.isExternal ? 'call-link external' : 'call-link');
               const escaped = this.esc(t.function);
-              callTargets[stmt.startLine] = {
+              if (!callTargets[stmt.startLine]) callTargets[stmt.startLine] = [];
+              callTargets[stmt.startLine].push({
                 cls, escaped,
                 linkHtml: `<span class="${cls}" data-func-id="${this.esc(t.funcId)}" title="${this.esc(t.funcId)}">${escaped}</span>`,
-              };
+              });
             }
           }
         }
@@ -1771,10 +1791,12 @@ const App = {
           for (let i = fold.start; i <= fold.end; i++) {
             if (i < 1 || i > totalLines) continue;
             let codeHtml = getHighlighted(i - 1);
-            const ct = callTargets[i];
-            if (ct) {
-              const idx = codeHtml.indexOf(ct.escaped);
-              if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+            const cts = callTargets[i];
+            if (cts) {
+              for (const ct of cts) {
+                const idx = codeHtml.indexOf(ct.escaped);
+                if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+              }
             }
             this._lines.push({
               lineNum: i, type: 'user-fold-content', hidden: true,
@@ -1825,10 +1847,12 @@ const App = {
 
         // Regular line
         let codeHtml = getHighlighted(lineNum - 1);
-        const ct = callTargets[lineNum];
-        if (ct) {
-          const idx = codeHtml.indexOf(ct.escaped);
-          if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+        const cts = callTargets[lineNum];
+        if (cts) {
+          for (const ct of cts) {
+            const idx = codeHtml.indexOf(ct.escaped);
+            if (idx !== -1) codeHtml = codeHtml.substring(0, idx) + ct.linkHtml + codeHtml.substring(idx + ct.escaped.length);
+          }
         }
         this._lines.push({
           lineNum, type: 'line', hidden: false,
@@ -2184,7 +2208,10 @@ const App = {
 
     isCommentLine(line) {
       const t = line.trimStart();
-      return t.startsWith('//') || t.startsWith('/*') || t.startsWith('*') && !t.startsWith('*/');
+      if (t.startsWith('//') || t.startsWith('/*')) return true;
+      // Inside block comments: bare "*", "* text", "*\ttext" — but not "*/" or "*ptr"
+      if (t === '*' || t.startsWith('* ') || t.startsWith('*\t')) return true;
+      return false;
     },
 
     renderStatement(container, stmt, sourceLines) {
