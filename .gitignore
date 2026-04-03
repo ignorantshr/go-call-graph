@@ -20,3 +20,9 @@ coverage.html
 # Temporary
 tmp/
 web/
+
+# Test data
+testdata/
+
+# Claude Code
+.claude/
