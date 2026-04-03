@@ -41,6 +41,7 @@ func New(analysis *model.ProjectAnalysis, cfg *config.Config) *Server {
 			s.fileCache[path] = string(src)
 		}
 	}
+	EnsureBuiltinThemes()
 	s.registerRoutes()
 	return s
 }
@@ -50,6 +51,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/project", s.handleProject)
 	s.mux.HandleFunc("/api/userdata", s.handleLoadUserData)
 	s.mux.HandleFunc("/api/userdata/save", s.handleSaveUserData)
+	s.mux.HandleFunc("/api/themes", handleThemes)
+	s.mux.HandleFunc("/api/theme", handleThemeGet)
 	s.mux.HandleFunc("/api/tree", s.handleTree)
 	s.mux.HandleFunc("/api/file", s.handleFile)
 	s.mux.HandleFunc("/api/func", s.handleFunc)

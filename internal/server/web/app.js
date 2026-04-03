@@ -46,6 +46,16 @@ const App = {
         document.getElementById('font-size-input').value = ud.fontSize;
         document.documentElement.style.setProperty('--code-font-size', ud.fontSize + 'px');
       }
+      if (ud.theme && ud.theme !== 'dark') {
+        // Apply custom theme vars from server
+        try {
+          const vars = await fetch('/api/theme?name=' + encodeURIComponent(ud.theme)).then(r => r.json());
+          for (const [key, val] of Object.entries(vars)) {
+            document.documentElement.style.setProperty('--' + key, val);
+          }
+          document.documentElement.setAttribute('data-theme', ud.theme);
+        } catch {}
+      }
     } catch {}
     if (this.state.muted.length === 0) {
       this.state.muted = [
@@ -68,6 +78,7 @@ const App = {
           views: this.state._views || {},
           outline: !document.getElementById('code-outline').classList.contains('hidden'),
           fontSize: parseInt(document.getElementById('font-size-input').value, 10) || 12,
+          theme: document.documentElement.getAttribute('data-theme') || 'dark',
         }),
       }).catch(() => {});
     }, 500);
@@ -236,6 +247,37 @@ const App = {
       e.target.classList.toggle('active');
       document.querySelectorAll('.func-body-chain').forEach(el => el.classList.toggle('chain-wrap'));
     });
+
+    // Theme selector
+    const themeSel = document.getElementById('theme-select');
+    const loadThemeList = async () => {
+      try {
+        const names = await this.api('/api/themes');
+        themeSel.innerHTML = '';
+        for (const name of names) {
+          const opt = document.createElement('option');
+          opt.value = name; opt.textContent = name;
+          themeSel.appendChild(opt);
+        }
+        const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+        themeSel.value = cur;
+      } catch {}
+    };
+    const applyThemeVars = async (name) => {
+      try {
+        const vars = await fetch('/api/theme?name=' + encodeURIComponent(name)).then(r => r.json());
+        const root = document.documentElement;
+        for (const [key, val] of Object.entries(vars)) {
+          root.style.setProperty('--' + key, val);
+        }
+        root.setAttribute('data-theme', name);
+      } catch {}
+    };
+    themeSel.addEventListener('change', async () => {
+      await applyThemeVars(themeSel.value);
+      this.saveLocalState();
+    });
+    loadThemeList();
 
     // Font size adjustment
     document.getElementById('font-size-input').addEventListener('change', (e) => {
