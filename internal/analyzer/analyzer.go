@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"bufio"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -13,6 +14,20 @@ import (
 	"github.com/ignorantshr/go-call-graph/internal/model"
 	"golang.org/x/tools/go/packages"
 )
+
+var defaultLogPackages = []string{
+	"log", "log/slog",
+	"go.uber.org/zap",
+	"github.com/sirupsen/logrus",
+	"github.com/rs/zerolog", "github.com/rs/zerolog/log",
+}
+
+var defaultLogFuncPrefixes = []string{
+	"Log", "Debug", "Info", "Warn", "Error", "Fatal", "Panic",
+	"Printf", "Println", "Print",
+	"Debugf", "Infof", "Warnf", "Errorf", "Fatalf", "Panicf",
+	"Debugw", "Infow", "Warnw", "Errorw", "Fatalw",
+}
 
 // Analyze loads and analyzes the Go project at the given directory.
 func Analyze(appCfg *config.Config) (*model.ProjectAnalysis, error) {
@@ -57,10 +72,13 @@ func Analyze(appCfg *config.Config) (*model.ProjectAnalysis, error) {
 		}
 	}
 
+	modulePath := readModulePath(dir)
+
 	result := &model.ProjectAnalysis{
-		Root:      dir,
-		Files:     make(map[string]*model.FileAnalysis),
-		Functions: make(map[string]*model.FuncBlock),
+		Root:       dir,
+		ModulePath: modulePath,
+		Files:      make(map[string]*model.FileAnalysis),
+		Functions:  make(map[string]*model.FuncBlock),
 	}
 
 	// Collect package names
@@ -79,12 +97,12 @@ func Analyze(appCfg *config.Config) (*model.ProjectAnalysis, error) {
 		excludeDirs = append(excludeDirs, abs+string(filepath.Separator))
 	}
 
-	// Build log packages map from config
-	logPkgs := make(map[string]bool, len(appCfg.Classifier.LogPackages))
-	for _, p := range appCfg.Classifier.LogPackages {
+	// Build log packages map from built-in defaults
+	logPkgs := make(map[string]bool, len(defaultLogPackages))
+	for _, p := range defaultLogPackages {
 		logPkgs[p] = true
 	}
-	logPrefixes := appCfg.Classifier.LogFuncPrefixes
+	logPrefixes := defaultLogFuncPrefixes
 
 	// Extract functions from AST
 	fset := pkgs[0].Fset
@@ -243,7 +261,8 @@ func exprToString(expr ast.Expr) string {
 
 func enrichWithCallGraphPositions(result *model.ProjectAnalysis, positions map[string]token.Position) {
 	// For each function in the call graph, if we have a matching FuncBlock,
-	// enrich the CallTarget entries in statements with file/line info.
+	// enrich the CallTarget entries in statements with file/line info
+	// and accurately classify stdlib/external using the module path.
 	for _, fa := range result.Files {
 		for _, fn := range fa.Functions {
 			for i, stmt := range fn.Statements {
@@ -254,17 +273,28 @@ func enrichWithCallGraphPositions(result *model.ProjectAnalysis, positions map[s
 					fn.Statements[i].CallTarget.FilePath = pos.Filename
 					fn.Statements[i].CallTarget.Line = pos.Line
 				}
-				// Determine stdlib/external based on project packages
-				if isProjectPackage(result.Packages, stmt.CallTarget.Package) {
-					// Project package — override any false positive from isStdLib heuristic
+				pkg := stmt.CallTarget.Package
+				if isProjectPackage(result.Packages, pkg) || isModulePackage(result.ModulePath, pkg) {
 					fn.Statements[i].CallTarget.IsStdLib = false
 					fn.Statements[i].CallTarget.IsExternal = false
-				} else if !stmt.CallTarget.IsStdLib {
+				} else if isStdLib(pkg) {
+					fn.Statements[i].CallTarget.IsStdLib = true
+					fn.Statements[i].CallTarget.IsExternal = false
+				} else {
+					fn.Statements[i].CallTarget.IsStdLib = false
 					fn.Statements[i].CallTarget.IsExternal = true
 				}
 			}
 		}
 	}
+}
+
+// isModulePackage checks if pkgPath belongs to the project's Go module.
+func isModulePackage(modulePath, pkgPath string) bool {
+	if modulePath == "" || pkgPath == "" {
+		return false
+	}
+	return pkgPath == modulePath || strings.HasPrefix(pkgPath, modulePath+"/")
 }
 
 // extractFuncLits walks a block statement looking for anonymous functions (*ast.FuncLit),
@@ -343,4 +373,21 @@ func isProjectPackage(projectPkgs []string, pkgPath string) bool {
 		}
 	}
 	return false
+}
+
+// readModulePath reads the module path from go.mod in the given directory.
+func readModulePath(dir string) string {
+	f, err := os.Open(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
+		}
+	}
+	return ""
 }

@@ -11,20 +11,20 @@ type CallgraphConfig struct {
 	DefaultDepth int `yaml:"default_depth"`
 }
 
-// ClassifierConfig holds statement classification settings.
-type ClassifierConfig struct {
-	LogPackages     []string `yaml:"log_packages"`
-	LogFuncPrefixes []string `yaml:"log_func_prefixes"`
+// MuteRule defines a single mute rule.
+type MuteRule struct {
+	Type    string `yaml:"type" json:"type"`       // "stdlib", "external", "package", "func", "pattern"
+	Pattern string `yaml:"pattern" json:"pattern"` // required for package/func/pattern types
 }
 
 // Config is the top-level configuration.
 type Config struct {
-	Dir        string           `yaml:"dir"`
-	Port       int              `yaml:"port"`
-	Dev        bool             `yaml:"dev"`
-	Exclude    []string         `yaml:"exclude"` // relative dirs to exclude from analysis
-	Callgraph  CallgraphConfig  `yaml:"callgraph"`
-	Classifier ClassifierConfig `yaml:"classifier"`
+	Dir       string          `yaml:"dir"`
+	Port      int             `yaml:"port"`
+	Dev       bool            `yaml:"dev"`
+	Exclude   []string        `yaml:"exclude"` // relative dirs to exclude from analysis
+	Callgraph CallgraphConfig `yaml:"callgraph"`
+	Mute      []MuteRule      `yaml:"mute"`
 }
 
 // DefaultConfig returns a Config with all default values.
@@ -35,21 +35,8 @@ func DefaultConfig() *Config {
 		Callgraph: CallgraphConfig{
 			DefaultDepth: 2,
 		},
-		Classifier: ClassifierConfig{
-			LogPackages: []string{
-				"log",
-				"log/slog",
-				"go.uber.org/zap",
-				"github.com/sirupsen/logrus",
-				"github.com/rs/zerolog",
-				"github.com/rs/zerolog/log",
-			},
-			LogFuncPrefixes: []string{
-				"Log", "Debug", "Info", "Warn", "Error", "Fatal", "Panic",
-				"Printf", "Println", "Print",
-				"Debugf", "Infof", "Warnf", "Errorf", "Fatalf", "Panicf",
-				"Debugw", "Infow", "Warnw", "Errorw", "Fatalw",
-			},
+		Mute: []MuteRule{
+			{Type: "stdlib"},
 		},
 	}
 }

@@ -21,7 +21,10 @@ type TreeNode struct {
 }
 
 func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"root": s.analysis.Root})
+	writeJSON(w, map[string]string{
+		"root":       s.analysis.Root,
+		"modulePath": s.analysis.ModulePath,
+	})
 }
 
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +227,7 @@ func (s *Server) handleCallGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	muted := parseMuted(r.URL.Query().Get("muted"))
-	subgraph := analyzer.GetSubgraph(s.analysis.CallGraph, funcID, depth, muted)
+	subgraph := analyzer.GetSubgraph(s.analysis.CallGraph, funcID, depth, muted, s.analysis.ModulePath)
 	writeJSON(w, s.toGraphResponse(subgraph))
 }
 
@@ -340,6 +343,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, results)
+}
+
+func (s *Server) handleMuteDefaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.muteDefaults)
 }
 
 func parseMuted(param string) map[string]bool {

@@ -91,7 +91,8 @@ func FindChain(cg *model.CallGraphData, nodeIDs []string, muted map[string]bool)
 
 // GetSubgraph returns a subgraph centered on funcID, expanding to the given depth
 // in both caller and callee directions, excluding muted functions.
-func GetSubgraph(cg *model.CallGraphData, funcID string, depth int, muted map[string]bool) *model.CallGraphData {
+// modulePath is used to avoid treating module packages as stdlib leaf nodes.
+func GetSubgraph(cg *model.CallGraphData, funcID string, depth int, muted map[string]bool, modulePath string) *model.CallGraphData {
 	result := &model.CallGraphData{
 		Nodes: make(map[string]*model.CallGraphNode),
 	}
@@ -101,14 +102,14 @@ func GetSubgraph(cg *model.CallGraphData, funcID string, depth int, muted map[st
 	}
 
 	// BFS outward from funcID in callee direction
-	bfsExpand(cg, result, funcID, depth, muted, true)
+	bfsExpand(cg, result, funcID, depth, muted, true, modulePath)
 	// BFS outward from funcID in caller direction
-	bfsExpand(cg, result, funcID, depth, muted, false)
+	bfsExpand(cg, result, funcID, depth, muted, false, modulePath)
 
 	return result
 }
 
-func bfsExpand(cg, result *model.CallGraphData, startID string, depth int, muted map[string]bool, forward bool) {
+func bfsExpand(cg, result *model.CallGraphData, startID string, depth int, muted map[string]bool, forward bool, modulePath string) {
 	type item struct {
 		id    string
 		depth int
@@ -133,7 +134,8 @@ func bfsExpand(cg, result *model.CallGraphData, startID string, depth int, muted
 		}
 
 		// Don't expand into stdlib/external internals — treat them as leaf nodes
-		if cur.id != startID && isStdLib(funcIDToPkgPath(cur.id)) {
+		pkg := funcIDToPkgPath(cur.id)
+		if cur.id != startID && isStdLib(pkg) && !isModulePackage(modulePath, pkg) {
 			continue
 		}
 

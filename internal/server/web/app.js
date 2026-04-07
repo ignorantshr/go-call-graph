@@ -12,7 +12,7 @@ const App = {
     bookmarkChainMode: false,
     cache: {},
     graphData: null,        // kept for API compat
-    stdlibIds: new Set(),   // set of known stdlib function IDs
+    modulePath: '',         // Go module path from /api/project
     history: [],            // navigation history [{type, filePath, line, funcId}]
     historyIdx: -1,         // current position in history
     _navigating: false,     // flag to suppress history push during back/forward
@@ -22,6 +22,10 @@ const App = {
   },
 
   async init() {
+    try {
+      const proj = await this.api('/api/project');
+      this.state.modulePath = proj.modulePath || '';
+    } catch {}
     await this.loadUserData();
     this.bindEvents();
     this.chain.init();
@@ -56,12 +60,16 @@ const App = {
         } catch {}
       }
     } catch {}
-    if (this.state.muted.length === 0) {
-      this.state.muted = [
-        { type: 'stdlib', pattern: '*', builtin: true },
-      ];
-      this.saveLocalState();
-    }
+    // Load default mute rules from config and merge as builtin
+    try {
+      const defaults = await fetch('/api/mute/defaults').then(r => r.json());
+      if (Array.isArray(defaults)) {
+        // Remove stale builtin rules, then prepend fresh ones
+        this.state.muted = this.state.muted.filter(r => !r.builtin);
+        const builtins = defaults.map(r => ({ ...r, builtin: true }));
+        this.state.muted = [...builtins, ...this.state.muted];
+      }
+    } catch {}
   },
 
   saveLocalState() {
@@ -73,7 +81,7 @@ const App = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           bookmarks: this.state.bookmarks,
-          muted: this.state.muted,
+          muted: this.state.muted.filter(r => !r.builtin),
           views: this.state._views || {},
           outline: !document.getElementById('code-outline').classList.contains('hidden'),
           fontSize: parseInt(document.getElementById('font-size-input').value, 10) || 12,
@@ -1195,8 +1203,7 @@ const App = {
         for (const stmt of data.statements) {
           if (!stmt.callTarget) continue;
           const t = stmt.callTarget;
-          if (App.mute.isMatch(t.funcId)) continue;
-          if (t.isStdLib || t.isExternal) continue;
+          if (App.mute.isMatch(t.funcId, t)) continue;
           if (!t.filePath) continue;
 
           await this._ensureFileBox(t.filePath);
@@ -2654,17 +2661,37 @@ const App = {
   //  MUTE
   // ============================================================
   mute: {
-    isMatch(funcId) {
+    // isMatch checks if a function should be muted.
+    // callTarget is optional — when provided, its isStdLib/isExternal fields are used
+    // for stdlib/external rules; otherwise falls back to heuristic on funcId.
+    isMatch(funcId, callTarget) {
       return App.state.muted.some(rule => {
         if (rule.type === 'func') return funcId === rule.pattern;
         if (rule.type === 'package') return funcId.startsWith(rule.pattern + '.');
-        if (rule.type === 'stdlib') return App.state.stdlibIds.has(funcId);
+        if (rule.type === 'stdlib') {
+          if (callTarget) return !!callTarget.isStdLib;
+          return this._isStdLibId(funcId);
+        }
         if (rule.type === 'pattern') {
           const regex = new RegExp(rule.pattern.replace(/\./g, '\\.').replace(/\*/g, '.*'));
           return regex.test(funcId);
         }
         return false;
       });
+    },
+
+    // Determine if a funcId belongs to a stdlib package.
+    // Uses the module path to avoid false positives for modules without dots (e.g. "commgame/server").
+    _isStdLibId(funcId) {
+      const pkg = funcId.includes('.(') ? funcId.substring(0, funcId.indexOf('.('))
+                : funcId.includes('.') ? funcId.substring(0, funcId.lastIndexOf('.'))
+                : funcId;
+      if (!pkg) return false;
+      // If it belongs to the project module, it's definitely not stdlib
+      const mod = App.state.modulePath;
+      if (mod && (pkg === mod || pkg.startsWith(mod + '/'))) return false;
+      const firstSegment = pkg.split('/')[0];
+      return !firstSegment.includes('.');
     },
 
 
@@ -2701,7 +2728,7 @@ const App = {
         const item = document.createElement('div');
         item.className = 'muted-item';
         item.innerHTML = `
-          <span class="mute-pattern">${App.codeView.esc(rule.type)}: ${App.codeView.esc(rule.pattern)}${rule.builtin ? ' (built-in)' : ''}</span>
+          <span class="mute-pattern">${App.codeView.esc(rule.type)}${rule.pattern ? ': ' + App.codeView.esc(rule.pattern) : ''}${rule.builtin ? ' (default)' : ''}</span>
           <span class="mute-remove" title="Remove">×</span>
         `;
         item.querySelector('.mute-remove').addEventListener('click', () => {

@@ -309,7 +309,7 @@ func resolveCallTarget(call *ast.CallExpr, info *types.Info) *model.CallTarget {
 				FuncID:   fmt.Sprintf("%s.(%s).%s", pkgPath, typeName, funcName),
 				Package:  pkgPath,
 				Function: funcName,
-				IsStdLib: isStdLib(pkgPath),
+				IsStdLib: false, // set accurately in enrichWithCallGraphPositions
 			}
 		}
 		// Qualified identifier: pkg.Func()
@@ -323,7 +323,7 @@ func resolveCallTarget(call *ast.CallExpr, info *types.Info) *model.CallTarget {
 				FuncID:   fmt.Sprintf("%s.%s", pkgPath, obj.Name()),
 				Package:  pkgPath,
 				Function: obj.Name(),
-				IsStdLib: isStdLib(pkgPath),
+				IsStdLib: false, // set accurately in enrichWithCallGraphPositions
 			}
 		}
 
@@ -339,7 +339,7 @@ func resolveCallTarget(call *ast.CallExpr, info *types.Info) *model.CallTarget {
 				FuncID:   fmt.Sprintf("%s.%s", pkgPath, obj.Name()),
 				Package:  pkgPath,
 				Function: obj.Name(),
-				IsStdLib: isStdLib(pkgPath),
+				IsStdLib: false, // set accurately in enrichWithCallGraphPositions
 			}
 		}
 	}

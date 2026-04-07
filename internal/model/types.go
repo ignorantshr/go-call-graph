@@ -2,11 +2,12 @@ package model
 
 // ProjectAnalysis is the top-level analysis result for an entire Go project.
 type ProjectAnalysis struct {
-	Root      string                   `json:"root"`
-	Packages  []string                 `json:"packages"`
-	Files     map[string]*FileAnalysis `json:"files"`     // keyed by file path
-	Functions map[string]*FuncBlock    `json:"functions"`  // keyed by FuncID
-	CallGraph *CallGraphData           `json:"call_graph"`
+	Root       string                   `json:"root"`
+	ModulePath string                   `json:"modulePath"` // Go module path from go.mod
+	Packages   []string                 `json:"packages"`
+	Files      map[string]*FileAnalysis `json:"files"`     // keyed by file path
+	Functions  map[string]*FuncBlock    `json:"functions"`  // keyed by FuncID
+	CallGraph  *CallGraphData           `json:"call_graph"`
 }
 
 // FileAnalysis holds analysis results for a single Go source file.

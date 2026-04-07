@@ -22,48 +22,22 @@ callgraph:
   # 默认展开深度（前端请求不带 depth 参数时的后备值）
   default_depth: 2
 
-# 日志调用识别
+# 默认静音规则
 #
-# 代码分析时，每条语句会被分类为不同类别（call、log、error_check、defer 等）。
-# 被识别为 "log" 的调用在代码视图中会被标记为可折叠，视觉上弱化处理，
-# 帮助开发者聚焦核心业务逻辑。
+# 这些规则在启动时加载到前端，作为默认的 mute 规则显示在界面上。
+# 用户可以在界面中添加/删除自己的规则，但这里的规则每次启动都会重新加载。
 #
-# 识别规则：
-#   1. 调用目标的包路径在 log_packages 列表中 → 直接判定为日志调用
-#   2. 调用目标的函数名匹配 log_func_prefixes 中的前缀，
-#      且包路径包含 "log" 或 "zap" → 判定为日志调用
-#   3. fmt.Print/Fprint/Sprint 系列始终视为日志调用
-#
-# 如果你的项目使用了自定义日志库（如 github.com/phuslu/log），
-# 请将其包路径添加到 log_packages 中，以获得正确的分类效果。
-classifier:
-  log_packages:
-    - "log"
-    - "log/slog"
-    - "go.uber.org/zap"
-    - "github.com/sirupsen/logrus"
-    - "github.com/rs/zerolog"
-    - "github.com/rs/zerolog/log"
-
-  log_func_prefixes:
-    - "Log"
-    - "Debug"
-    - "Info"
-    - "Warn"
-    - "Error"
-    - "Fatal"
-    - "Panic"
-    - "Printf"
-    - "Println"
-    - "Print"
-    - "Debugf"
-    - "Infof"
-    - "Warnf"
-    - "Errorf"
-    - "Fatalf"
-    - "Panicf"
-    - "Debugw"
-    - "Infow"
-    - "Warnw"
-    - "Errorw"
-    - "Fatalw"
+# 支持的规则类型：
+#   - type: stdlib              静音所有标准库函数
+#   - type: package             静音指定包路径下的所有函数
+#     pattern: "pkg/path"
+#   - type: func                静音指定函数
+#     pattern: "pkg/path.FuncName"
+#   - type: pattern             通配符模式匹配
+#     pattern: "middleware.*"
+mute:
+  - type: stdlib
+#   - type: package
+#     pattern: "github.com/foo/bar"
+#   - type: pattern
+#     pattern: "internal/debug.*"
