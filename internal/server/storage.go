@@ -70,14 +70,14 @@ func EnsureBuiltinThemes() {
 	os.MkdirAll(dir, 0755)
 
 	dark := map[string]string{
-		"bg-primary": "#1e1e2e", "bg-secondary": "#181825", "bg-surface": "#313244", "bg-hover": "#45475a",
-		"text-primary": "#cdd6f4", "text-secondary": "#a6adc8", "text-dim": "#585b70", "border": "#45475a",
-		"accent-blue": "#89b4fa", "accent-green": "#a6e3a1", "accent-orange": "#fab387", "accent-red": "#f38ba8",
-		"accent-yellow": "#f9e2af", "accent-purple": "#cba6f7", "accent-teal": "#94e2d5",
-		"highlight-caller": "#89b4fa", "highlight-current": "#fab387", "highlight-callee": "#a6e3a1",
-		"code-keyword": "#cba6f7", "code-string": "#a6e3a1", "code-comment": "#585b70",
-		"code-func": "#89b4fa", "code-type": "#f9e2af", "code-number": "#fab387",
-		"scrollbar-thumb": "#45475a", "scrollbar-thumb-hover": "#585b70",
+		"bg-primary": "#1a1a1a", "bg-secondary": "#141414", "bg-surface": "#262626", "bg-hover": "#333333",
+		"text-primary": "#e8e8e8", "text-secondary": "#b0b0b0", "text-dim": "#606060", "border": "#333333",
+		"accent-blue": "#58a6ff", "accent-green": "#56d364", "accent-orange": "#f0883e", "accent-red": "#f85149",
+		"accent-yellow": "#e3b341", "accent-purple": "#d2a8ff", "accent-teal": "#39d2c0",
+		"highlight-caller": "#58a6ff", "highlight-current": "#f0883e", "highlight-callee": "#56d364",
+		"code-keyword": "#d2a8ff", "code-string": "#56d364", "code-comment": "#606060",
+		"code-func": "#58a6ff", "code-type": "#e3b341", "code-number": "#f0883e",
+		"scrollbar-thumb": "#333333", "scrollbar-thumb-hover": "#505050",
 	}
 	light := map[string]string{
 		"bg-primary": "#eff1f5", "bg-secondary": "#e6e9ef", "bg-surface": "#ccd0da", "bg-hover": "#bcc0cc",

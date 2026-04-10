@@ -250,9 +250,28 @@ const App = {
     // Toolbar
     document.getElementById('fit-btn').addEventListener('click', () => this.chain.fitToView());
     document.getElementById('chain-reset-btn').addEventListener('click', () => this.chain.reset());
+    document.getElementById('keep-view-btn').addEventListener('click', (e) => {
+      e.target.classList.toggle('active');
+    });
     document.getElementById('chain-wrap-btn').addEventListener('click', (e) => {
       e.target.classList.toggle('active');
+      e.target.textContent = e.target.classList.contains('active') ? 'On' : 'Off';
+      // Lock file box widths before toggling wrap to prevent resize
+      document.querySelectorAll('.file-box').forEach(box => {
+        if (!box.style.width) box.style.width = box.offsetWidth + 'px';
+      });
       document.querySelectorAll('.func-body-chain').forEach(el => el.classList.toggle('chain-wrap'));
+      this.chain._updateArrows();
+    });
+
+    // Settings panel toggle
+    document.getElementById('settings-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('settings-panel').classList.toggle('hidden');
+    });
+    document.getElementById('settings-panel').addEventListener('click', (e) => e.stopPropagation());
+    document.addEventListener('click', () => {
+      document.getElementById('settings-panel').classList.add('hidden');
     });
 
     // Theme selector
@@ -512,8 +531,18 @@ const App = {
         document.getElementById('zoom-level').textContent = Math.round(this.vscale * 100) + '%';
       }, { passive: false });
 
-      // Depth change → reload current chain
-      document.getElementById('chain-depth').addEventListener('change', () => {
+      // Depth change → reload current chain (skip if Pin is active and depth decreased)
+      const depthInput = document.getElementById('chain-depth');
+      this._lastDepth = parseInt(depthInput.value, 10) || 0;
+      depthInput.addEventListener('change', () => {
+        const newDepth = parseInt(depthInput.value, 10) || 0;
+        const keepView = document.getElementById('keep-view-btn').classList.contains('active');
+        if (keepView && newDepth < this._lastDepth) {
+          // Depth decreased with Pin on: just update the stored depth, don't reload
+          this._lastDepth = newDepth;
+          return;
+        }
+        this._lastDepth = newDepth;
         this.reloadCurrent();
       });
     },
@@ -1107,7 +1136,7 @@ const App = {
         path.setAttribute('class', 'chain-arrow');
         path.setAttribute('d', d);
         path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', '#a6e3a1');
+        path.setAttribute('stroke', '#56d364');
         path.setAttribute('stroke-width', '1.5');
         path.setAttribute('marker-end', 'url(#arrow-chain)');
         svg.appendChild(path);
