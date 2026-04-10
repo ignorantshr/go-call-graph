@@ -223,9 +223,9 @@ func addPathToResult(result *model.CallGraphData, cg *model.CallGraphData, path 
 
 func ssaFuncID(fn *ssa.Function) string {
 	if fn.Pkg == nil || fn.Pkg.Pkg == nil {
-		// Built-in or synthetic function
+		// Built-in or synthetic function (includes some generic instantiations)
 		if fn.Object() != nil {
-			return fn.RelString(nil)
+			return stripAllTypeParams(fn.RelString(nil))
 		}
 		return ""
 	}
@@ -255,13 +255,34 @@ func ssaFuncID(fn *ssa.Function) string {
 	return pkgPath + "." + name
 }
 
-// stripTypeParams removes type parameter brackets from a name.
+// stripTypeParams removes type parameter brackets from a simple name.
 // e.g. "Foo[int, string]" → "Foo", "Bar" → "Bar"
 func stripTypeParams(name string) string {
 	if idx := strings.Index(name, "["); idx != -1 {
 		return name[:idx]
 	}
 	return name
+}
+
+// stripAllTypeParams removes ALL [...] bracket groups from a string,
+// handling nested brackets. Used for full function IDs like
+// "pkg.(Pair[int]).Swap" → "pkg.(Pair).Swap" or "pkg.Max[int]" → "pkg.Max".
+func stripAllTypeParams(s string) string {
+	var out strings.Builder
+	depth := 0
+	for _, c := range s {
+		switch {
+		case c == '[':
+			depth++
+		case c == ']':
+			depth--
+		default:
+			if depth == 0 {
+				out.WriteRune(c)
+			}
+		}
+	}
+	return out.String()
 }
 
 func getOrCreateNode(cg *model.CallGraphData, funcID string) *model.CallGraphNode {

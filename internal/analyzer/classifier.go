@@ -87,6 +87,64 @@ func ClassifyBlockStatements(fset *token.FileSet, body *ast.BlockStmt, info *typ
 }
 
 func classifyStmt(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
+	results := classifyStmtCore(fset, stmt, info, src, logPkgs, logPrefixes)
+
+	// Extract function references (functions used as values, not called directly).
+	// Skip statements that recurse into sub-blocks (control flow, case clauses)
+	// since their children are processed separately.
+	switch stmt.(type) {
+	case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt,
+		*ast.TypeSwitchStmt, *ast.SelectStmt, *ast.CaseClause, *ast.CommClause, *ast.BlockStmt:
+		// Sub-statements are already recursed into; don't double-extract refs from them
+	default:
+		// Collect funcIDs already captured as call targets
+		existing := map[string]bool{}
+		for _, r := range results {
+			if r.CallTarget != nil {
+				existing[r.CallTarget.FuncID] = true
+			}
+		}
+		stmtCode := extractCode(src, stmt.Pos(), stmt.End(), fset)
+
+		// Extract nested call expressions (e.g. Greet("Go") inside fmt.Println(...))
+		nestedCalls := extractAllCallTargets(stmt, info)
+		for _, nc := range nestedCalls {
+			if existing[nc.target.FuncID] {
+				continue
+			}
+			existing[nc.target.FuncID] = true
+			ncPos := fset.Position(nc.pos)
+			classified := classifyCall(model.Statement{
+				StartLine: ncPos.Line,
+				EndLine:   ncPos.Line,
+				Code:      stmtCode,
+				Category:  model.CategoryOther,
+			}, nc.call, info, logPkgs, logPrefixes)
+			results = append(results, classified)
+		}
+
+		// Extract function references (functions used as values, not called directly)
+		refs := extractFuncRefs(stmt, info)
+		for _, ref := range refs {
+			if existing[ref.target.FuncID] {
+				continue
+			}
+			existing[ref.target.FuncID] = true
+			refPos := fset.Position(ref.pos)
+			results = append(results, model.Statement{
+				StartLine:  refPos.Line,
+				EndLine:    refPos.Line,
+				Code:       stmtCode,
+				Category:   model.CategoryCall,
+				CallTarget: ref.target,
+			})
+		}
+	}
+
+	return results
+}
+
+func classifyStmtCore(fset *token.FileSet, stmt ast.Stmt, info *types.Info, src []byte, logPkgs map[string]bool, logPrefixes []string) []model.Statement {
 	startPos := fset.Position(stmt.Pos())
 	endPos := fset.Position(stmt.End())
 	code := extractCode(src, stmt.Pos(), stmt.End(), fset)
@@ -406,6 +464,141 @@ func extractFirstCallTarget(expr ast.Expr, info *types.Info) *model.CallTarget {
 		return true
 	})
 	return target
+}
+
+// nestedCall holds a call expression found nested inside a statement.
+type nestedCall struct {
+	target *model.CallTarget
+	call   *ast.CallExpr
+	pos    token.Pos
+}
+
+// extractAllCallTargets walks an AST node and finds ALL *ast.CallExpr nodes,
+// resolving their call targets. This catches nested calls like Greet("Go")
+// inside fmt.Println(Greet("Go"), Greet("World")).
+func extractAllCallTargets(node ast.Node, info *types.Info) []nestedCall {
+	var calls []nestedCall
+	seen := map[string]bool{}
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		// Skip FuncLit bodies
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if t := resolveCallTarget(call, info); t != nil {
+			if !seen[t.FuncID] {
+				seen[t.FuncID] = true
+				calls = append(calls, nestedCall{
+					target: t,
+					call:   call,
+					pos:    call.Pos(),
+				})
+			}
+		}
+		return true // continue into arguments to find deeper nested calls
+	})
+
+	return calls
+}
+
+// funcRef holds a function reference with its source position.
+type funcRef struct {
+	target *model.CallTarget
+	pos    token.Pos // position of the identifier in source
+}
+
+// extractFuncRefs walks an AST node and finds function-typed identifiers that are
+// NOT the Fun part of a call expression (i.e., function values passed as arguments,
+// stored in maps/slices, etc.). Returns CallTarget entries with positions.
+func extractFuncRefs(node ast.Node, info *types.Info) []funcRef {
+	// Collect all call expression Fun nodes so we can skip them
+	callFuns := map[ast.Node]bool{}
+	ast.Inspect(node, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			callFuns[call.Fun] = true
+		}
+		return true
+	})
+
+	var refs []funcRef
+	seen := map[string]bool{}
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		// Skip nodes that are the Fun part of a call expression
+		if callFuns[n] {
+			return false
+		}
+		// Skip the inside of FuncLit bodies (closures define new scopes)
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+
+		var obj types.Object
+		var identPos token.Pos
+		switch e := n.(type) {
+		case *ast.Ident:
+			obj = info.Uses[e]
+			identPos = e.Pos()
+		case *ast.SelectorExpr:
+			obj = info.Uses[e.Sel]
+			identPos = e.Sel.Pos()
+		default:
+			return true
+		}
+
+		if obj == nil {
+			return true
+		}
+
+		// Check if the object is a function (not a method call — those are handled by resolveCallTarget)
+		fn, ok := obj.(*types.Func)
+		if !ok {
+			return true
+		}
+
+		pkg := fn.Pkg()
+		pkgPath := ""
+		if pkg != nil {
+			pkgPath = pkg.Path()
+		}
+
+		funcID := fmt.Sprintf("%s.%s", pkgPath, fn.Name())
+		// For methods, include receiver type
+		sig := fn.Type().(*types.Signature)
+		if recv := sig.Recv(); recv != nil {
+			recvType := recv.Type()
+			if ptr, ok := recvType.(*types.Pointer); ok {
+				recvType = ptr.Elem()
+			}
+			if named, ok := recvType.(*types.Named); ok {
+				funcID = fmt.Sprintf("%s.(%s).%s", pkgPath, named.Obj().Name(), fn.Name())
+			}
+		}
+
+		if seen[funcID] {
+			return true
+		}
+		seen[funcID] = true
+
+		refs = append(refs, funcRef{
+			target: &model.CallTarget{
+				FuncID:   funcID,
+				Package:  pkgPath,
+				Function: fn.Name(),
+			},
+			pos: identPos,
+		})
+		return true
+	})
+
+	return refs
 }
 
 func isStdLib(pkgPath string) bool {
