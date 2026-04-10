@@ -250,6 +250,11 @@ const App = {
     // Toolbar
     document.getElementById('fit-btn').addEventListener('click', () => this.chain.fitToView());
     document.getElementById('chain-reset-btn').addEventListener('click', () => this.chain.reset());
+    document.getElementById('add-text-btn').addEventListener('click', (e) => {
+      e.target.classList.toggle('active');
+      this.chain._placingText = e.target.classList.contains('active');
+      this.chain.container.style.cursor = this.chain._placingText ? 'crosshair' : '';
+    });
     document.getElementById('keep-view-btn').addEventListener('click', (e) => {
       e.target.classList.toggle('active');
     });
@@ -446,6 +451,8 @@ const App = {
     _dragBox: null,       // file-box being dragged
     _dragStart: null,
     fileBoxes: {},        // filePath → {el, x, y, fileData, _userPositioned, funcEls:{}}
+    textAnnotations: [],  // [{id, el, x, y, text}]
+    _textIdCounter: 0,
     activeChains: new Set(),
     arrowData: [],        // [{fromFuncId, toFuncId, fromFilePath, toFilePath, fromLine?, el}]
     _funcDataCache: {},   // funcId → API response (for depth=0 arrow sync)
@@ -465,11 +472,22 @@ const App = {
       this._eventsBound = true;
       const container = this.container;
 
-      // Pan on empty area
+      // Pan on empty area / place text annotation
       container.addEventListener('mousedown', (e) => {
-        // Only pan if clicking on container/svg/hint (not on file boxes)
+        // Only act if clicking on container/svg/hint (not on file boxes)
         if (e.target === container || e.target === this.svgOverlay ||
             e.target.id === 'chain-empty-hint' || e.target.tagName === 'svg') {
+          // Text placement mode: place at click position
+          if (this._placingText) {
+            const rect = container.getBoundingClientRect();
+            const x = (e.clientX - rect.left - this.vx) / this.vscale;
+            const y = (e.clientY - rect.top - this.vy) / this.vscale;
+            this.addText(x, y);
+            this._placingText = false;
+            container.style.cursor = '';
+            document.getElementById('add-text-btn').classList.remove('active');
+            return;
+          }
           this.isPanning = true;
           this._panDist = 0;
           this.panStart = { x: e.clientX, y: e.clientY, vx: this.vx, vy: this.vy };
@@ -947,46 +965,56 @@ const App = {
       }
     },
 
-    // ---- dagre layout for file boxes ----
+    // ---- dagre tree layout for file boxes ----
     _layoutFileBoxes() {
       const entries = Object.entries(this.fileBoxes);
       if (entries.length === 0) return;
 
-      // Collect occupied rectangles from already-positioned boxes
-      const occupied = [];
-      const needLayout = [];
-      for (const [fp, fb] of entries) {
-        if (fb._userPositioned || fb._autoPositioned) {
-          occupied.push({ x: fb.x, y: fb.y, w: fb.el.offsetWidth || 300, h: fb.el.offsetHeight || 100 });
-        } else {
-          needLayout.push([fp, fb]);
+      // Check if any boxes need layout
+      const needLayout = entries.some(([, fb]) => !fb._userPositioned && !fb._autoPositioned);
+      if (!needLayout) return;
+
+      // Build a file-level DAG from arrowData: edges between file boxes
+      const fileEdges = new Set();
+      for (const arrow of this.arrowData) {
+        if (arrow.fromFilePath && arrow.toFilePath && arrow.fromFilePath !== arrow.toFilePath) {
+          fileEdges.add(arrow.fromFilePath + '\0' + arrow.toFilePath);
         }
       }
 
-      if (needLayout.length === 0) return;
+      // Use dagre to compute tree layout
+      const g = new dagre.graphlib.Graph();
+      g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80 });
+      g.setDefaultEdgeLabel(() => ({}));
 
-      const gap = 40;
-      for (const [fp, fb] of needLayout) {
+      for (const [fp, fb] of entries) {
         const w = fb.el.offsetWidth || 300;
         const h = fb.el.offsetHeight || 100;
+        g.setNode(fp, { width: w, height: h });
+      }
 
-        // Find position to the right of all occupied boxes
-        let x = 0, y = 0;
-        if (occupied.length > 0) {
-          // Place to the right of the rightmost box
-          let maxRight = -Infinity, refY = 0;
-          for (const r of occupied) {
-            if (r.x + r.w > maxRight) { maxRight = r.x + r.w; refY = r.y; }
-          }
-          x = maxRight + gap;
-          y = refY;
+      for (const edge of fileEdges) {
+        const [from, to] = edge.split('\0');
+        if (g.hasNode(from) && g.hasNode(to)) {
+          g.setEdge(from, to);
         }
+      }
 
-        fb.x = x; fb.y = y;
+      dagre.layout(g);
+
+      // Apply positions, skip user-positioned boxes
+      for (const [fp, fb] of entries) {
+        if (fb._userPositioned) continue;
+        const node = g.node(fp);
+        if (!node) continue;
+        // dagre returns center coordinates; convert to top-left
+        const x = node.x - node.width / 2;
+        const y = node.y - node.height / 2;
+        fb.x = x;
+        fb.y = y;
         fb.el.style.left = x + 'px';
         fb.el.style.top = y + 'px';
         fb._autoPositioned = true;
-        occupied.push({ x, y, w, h });
       }
     },
 
@@ -1338,7 +1366,7 @@ const App = {
 
     fitToView() {
       const entries = Object.values(this.fileBoxes);
-      if (entries.length === 0) return;
+      if (entries.length === 0 && this.textAnnotations.length === 0) return;
 
       const W = this.container.clientWidth;
       const H = this.container.clientHeight;
@@ -1352,6 +1380,14 @@ const App = {
         minY = Math.min(minY, fb.y);
         maxX = Math.max(maxX, fb.x + w);
         maxY = Math.max(maxY, fb.y + h);
+      }
+      for (const ta of this.textAnnotations) {
+        const w = ta.el.offsetWidth || 60;
+        const h = ta.el.offsetHeight || 24;
+        minX = Math.min(minX, ta.x);
+        minY = Math.min(minY, ta.y);
+        maxX = Math.max(maxX, ta.x + w);
+        maxY = Math.max(maxY, ta.y + h);
       }
       if (!isFinite(minX)) return;
 
@@ -1374,6 +1410,9 @@ const App = {
       }
       this.fileBoxes = {};
       this._pendingFileBoxes = {};
+      // Remove text annotations
+      for (const ta of this.textAnnotations) ta.el.remove();
+      this.textAnnotations = [];
       // Remove arrows
       this.svgOverlay.querySelectorAll('path.chain-arrow').forEach(p => p.remove());
       this.arrowData = [];
@@ -1386,6 +1425,115 @@ const App = {
       // Show hint
       const hint = document.getElementById('chain-empty-hint');
       if (hint) hint.style.display = '';
+    },
+
+    // ---- Text annotations ----
+    addText(x, y, text) {
+      const id = 'text-' + (++this._textIdCounter);
+      // Default position: center of visible canvas
+      if (x == null || y == null) {
+        const rect = this.container.getBoundingClientRect();
+        x = (rect.width / 2 - this.vx) / this.vscale;
+        y = (rect.height / 2 - this.vy) / this.vscale;
+      }
+
+      const el = document.createElement('div');
+      el.className = 'canvas-text';
+      el.textContent = text || 'Text';
+      el.style.left = x + 'px';
+      el.style.top = y + 'px';
+
+      // Delete button
+      const removeBtn = document.createElement('span');
+      removeBtn.className = 'text-remove';
+      removeBtn.textContent = '\u00d7';
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._removeText(id);
+      });
+      el.appendChild(removeBtn);
+
+      // Resize handle
+      const resizeGrip = document.createElement('div');
+      resizeGrip.className = 'file-box-resize';
+      resizeGrip.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        resizeGrip.classList.add('active');
+        const startX = e.clientX, startY = e.clientY;
+        const startW = el.offsetWidth, startH = el.offsetHeight;
+        const onMove = (ev) => {
+          const dxR = (ev.clientX - startX) / this.vscale;
+          const dyR = (ev.clientY - startY) / this.vscale;
+          el.style.width = Math.max(40, startW + dxR) + 'px';
+          el.style.height = Math.max(24, startH + dyR) + 'px';
+        };
+        const onUp = () => {
+          resizeGrip.classList.remove('active');
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+      el.appendChild(resizeGrip);
+
+      const ta = { id, el, x, y, text: text || 'Text' };
+
+      // Drag
+      el.addEventListener('mousedown', (e) => {
+        if (el.classList.contains('editing')) return;
+        if (e.target === resizeGrip) return;
+        e.stopPropagation();
+        this._dragBox = ta;
+        this._dragStart = { mx: e.clientX, my: e.clientY, bx: ta.x, by: ta.y };
+      });
+
+      // Double-click to edit
+      el.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        el.classList.add('editing');
+        el.contentEditable = 'true';
+        // Remove the delete button text from editable content
+        removeBtn.style.display = 'none';
+        el.focus();
+        // Select all text
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      });
+
+      const finishEdit = () => {
+        if (!el.classList.contains('editing')) return;
+        el.classList.remove('editing');
+        el.contentEditable = 'false';
+        removeBtn.style.display = '';
+        // Save text (exclude the remove button)
+        const clone = el.cloneNode(true);
+        const btn = clone.querySelector('.text-remove');
+        if (btn) btn.remove();
+        ta.text = clone.textContent.trim() || 'Text';
+        el.textContent = ta.text;
+        el.appendChild(removeBtn);
+      };
+
+      el.addEventListener('blur', finishEdit);
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { finishEdit(); el.blur(); }
+      });
+
+      this.canvas.appendChild(el);
+      this.textAnnotations.push(ta);
+      return ta;
+    },
+
+    _removeText(id) {
+      const idx = this.textAnnotations.findIndex(t => t.id === id);
+      if (idx === -1) return;
+      this.textAnnotations[idx].el.remove();
+      this.textAnnotations.splice(idx, 1);
     },
 
     clearHighlights() {
@@ -1423,19 +1571,20 @@ const App = {
       }
     },
     saveView() {
-      if (this.activeChains.size === 0) { alert('Nothing to save'); return; }
+      if (this.activeChains.size === 0 && this.textAnnotations.length === 0) { alert('Nothing to save'); return; }
       const name = prompt('View name:');
       if (!name) return;
       const positions = {};
       for (const [fp, fb] of Object.entries(this.fileBoxes)) {
         positions[fp] = { x: fb.x, y: fb.y };
       }
+      const texts = this.textAnnotations.map(ta => ({ x: ta.x, y: ta.y, text: ta.text }));
       const views = this._getViews();
       views[name] = {
         activeChains: [...this.activeChains],
         depth: parseInt(document.getElementById('chain-depth').value, 10) || 0,
         vx: this.vx, vy: this.vy, vscale: this.vscale,
-        positions,
+        positions, texts,
       };
       this._setViews(views);
     },
@@ -1468,6 +1617,12 @@ const App = {
             fb.el.style.left = pos.x + 'px';
             fb.el.style.top = pos.y + 'px';
           }
+        }
+      }
+      // Restore text annotations
+      if (view.texts) {
+        for (const t of view.texts) {
+          this.addText(t.x, t.y, t.text);
         }
       }
       // Restore canvas transform

@@ -290,6 +290,50 @@ body {
   z-index: 0;
 }
 
+/* Text annotations on canvas */
+.canvas-text {
+  position: absolute;
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  min-width: 40px;
+  min-height: 24px;
+  cursor: move;
+  user-select: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+  z-index: 1;
+}
+.canvas-text:hover { border-color: var(--accent-blue); }
+.canvas-text.editing {
+  cursor: text;
+  user-select: auto;
+  outline: none;
+  border-color: var(--accent-blue);
+  background: var(--bg-primary);
+}
+.canvas-text .text-remove {
+  position: absolute;
+  top: -8px; right: -8px;
+  width: 16px; height: 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: center;
+  cursor: pointer;
+  display: none;
+}
+.canvas-text:hover .text-remove { display: block; }
+.canvas-text .text-remove:hover { color: var(--accent-red); border-color: var(--accent-red); }
+
 /* File boxes in chain view */
 .file-box {
   position: absolute;
