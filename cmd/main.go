@@ -10,6 +10,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Set via ldflags: go build -ldflags "-X main.version=v1.0.0"
+var version = "dev"
+
 func main() {
 	var (
 		dir        string
@@ -19,8 +22,9 @@ func main() {
 	)
 
 	rootCmd := &cobra.Command{
-		Use:   "go-call-graph",
-		Short: "Interactive Go source code call graph analyzer",
+		Use:     "go-call-graph",
+		Short:   "Interactive Go source code call graph analyzer",
+		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Load config: defaults → file → CLI flags
 			var cfg *config.Config
