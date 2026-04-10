@@ -8,12 +8,15 @@ All API endpoints return JSON with `Content-Type: application/json`. CORS is ena
 
 ## GET /api/project
 
-Project root path.
+Project root path and module information.
 
 **Response:**
 
 ```json
-{ "root": "/absolute/path/to/project" }
+{
+  "root": "/absolute/path/to/project",
+  "modulePath": "github.com/user/project"
+}
 ```
 
 ---
@@ -181,7 +184,6 @@ Default mute rules from the config file. The frontend loads these on startup as 
 ```json
 [
   { "type": "stdlib", "pattern": "" },
-  { "type": "external", "pattern": "" },
   { "type": "package", "pattern": "github.com/foo/bar" }
 ]
 ```
